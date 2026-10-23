@@ -1,0 +1,40 @@
+# This crate is intentionally OUTSIDE the top-level Cargo workspace.
+# It is built/run only via `cargo tauri dev` from this directory once the
+# Tauri v2 prerequisites are installed (Rust, Node, WebView2 runtime).
+[workspace]
+
+[package]
+name = "promptloom-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.78"
+publish = false
+description = "PromptLoom desktop shell (Tauri v2)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+promptloom-core = { path = "../../../crates/core" }
+promptloom-audio = { path = "../../../crates/audio" }
+promptloom-asr = { path = "../../../crates/asr" }
+promptloom-output-windows = { path = "../../../crates/output-windows" }
+promptloom-vocabulary = { path = "../../../crates/vocabulary" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }

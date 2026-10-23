@@ -1,0 +1,15 @@
+# PromptLoom project vocabulary — committed example.
+# Copy to `.promptloom/terms.yml` in a project and point PromptLoom's
+# Settings at that project folder. Only this one file is parsed.
+#
+# Rules:
+#   - Case-insensitive whole-phrase replacement.
+#   - Longest source phrase wins over shorter ones.
+#   - Destination spelling is preserved exactly.
+
+terms:
+  "super base": "Supabase"
+  "prompt loom": "PromptLoom"
+  "post gress": "Postgres"
+  "type script": "TypeScript"
+  "k eight s": "k8s"

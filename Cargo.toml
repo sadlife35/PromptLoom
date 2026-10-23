@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/audio",
+    "crates/asr",
+    "crates/output-windows",
+    "crates/vocabulary",
+    "crates/test-support",
+]
+# apps/desktop/src-tauri is intentionally excluded from the default workspace
+# in M0. It requires Tauri v2 CLI prerequisites (Rust, Node, WebView2) and is
+# built/run separately via `cargo tauri dev` once those are installed. The
+# core crates above are the M0 ship-gate (`cargo test` passes without
+# microphone/network/model).
+exclude = ["apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.78"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "1"
+tracing = "0.1"
+
+promptloom-core = { path = "crates/core" }
+promptloom-audio = { path = "crates/audio" }
+promptloom-asr = { path = "crates/asr" }
+promptloom-output-windows = { path = "crates/output-windows" }
+promptloom-vocabulary = { path = "crates/vocabulary" }
+promptloom-test-support = { path = "crates/test-support" }

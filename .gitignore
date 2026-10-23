@@ -1,0 +1,24 @@
+target/
+**/*.rs.bk
+Cargo.lock
+
+node_modules/
+dist/
+apps/desktop/dist/
+.vite/
+
+# Local user state
+.promptloom/terms.yml
+!.promptloom/terms.yml.example
+
+# Models (never committed; downloaded on demand)
+models/*.bin
+models/*.gguf
+*.part
+
+# ASR fixtures are user-consented recordings; never committed.
+crates/asr/tests/fixtures/*.wav
+
+# OS
+Thumbs.db
+.DS_Store

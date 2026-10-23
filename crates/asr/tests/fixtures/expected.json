@@ -1,0 +1,66 @@
+{
+  "model": "ggml-base.en",
+  "cases": [
+    {
+      "file": "silence.wav",
+      "expected": "",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "allow_empty": true,
+      "max_edit_distance": 0
+    },
+    {
+      "file": "short.wav",
+      "expected": "hello world",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 1
+    },
+    {
+      "file": "prose.wav",
+      "expected": "open the terminal and run the test suite before pushing",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 3
+    },
+    {
+      "file": "dev-terms.wav",
+      "expected": "deploy the service to supabase using the postgres backend",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 6
+    },
+    {
+      "file": "dev-stack.wav",
+      "expected": "rust typescript and tauri version two",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 6
+    },
+    {
+      "file": "correction1.wav",
+      "expected": "push the promptloom branch and open a pull request",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 6
+    },
+    {
+      "file": "correction2.wav",
+      "expected": "super base is our auth provider",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 3
+    },
+    {
+      "file": "noisy.wav",
+      "expected": "open the terminal and run the test suite before pushing",
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "max_edit_distance": 10
+    },
+    {
+      "file": "long.wav",
+      "expected": null,
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "min_words": 15
+    },
+    {
+      "file": "pause.wav",
+      "expected": null,
+      "normalizations": ["lowercase", "trim-punct", "collapse-ws"],
+      "min_words": 4
+    }
+  ]
+}
