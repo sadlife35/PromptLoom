@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Onboarding } from "./Onboarding";
 
 type ModelStatus = {
   installed: boolean;
@@ -23,6 +24,7 @@ type PrivacyReport = {
 };
 
 export function App() {
+  const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null);
   const [state, setState] = useState<string>("");
   const [notices, setNotices] = useState<string[]>([]);
   const [model, setModel] = useState<ModelStatus | null>(null);
@@ -74,6 +76,9 @@ export function App() {
   };
 
   useEffect(() => {
+    invoke<boolean>("needs_onboarding")
+      .then(setOnboardingNeeded)
+      .catch(() => setOnboardingNeeded(false));
     refreshModel();
     refreshSettings();
     const unlistenState = listen<string>("promptloom:state", (e) =>
@@ -109,6 +114,24 @@ export function App() {
     progress && progress.total > 0
       ? Math.round((100 * progress.bytes) / progress.total)
       : 0;
+
+  if (onboardingNeeded === null) {
+    return (
+      <main style={{ fontFamily: "system-ui", padding: 24 }}>Loading…</main>
+    );
+  }
+
+  if (onboardingNeeded) {
+    return (
+      <Onboarding
+        onFinish={() => {
+          setOnboardingNeeded(false);
+          refreshSettings();
+          refreshModel();
+        }}
+      />
+    );
+  }
 
   return (
     <main style={{ fontFamily: "system-ui", padding: 24, maxWidth: 720 }}>

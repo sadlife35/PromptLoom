@@ -1,8 +1,10 @@
 //! promptloom-audio: WASAPI/CPAL capture, resampling, level meter.
 
+pub mod probe;
 pub mod resample;
 pub mod wasapi;
 
+pub use probe::{default_input_device_name, enumerate_input_devices, MicProbe, ProbeError};
 pub use wasapi::{LevelMeter, WasapiAudioSource};
 
 use promptloom_core::{AudioBuffer, AudioSource, PromptLoomError};

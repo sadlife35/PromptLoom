@@ -52,10 +52,25 @@ pub struct WasapiAudioSource {
 
 impl WasapiAudioSource {
     pub fn new() -> Result<Self, PromptLoomError> {
+        Self::new_with_device(None)
+    }
+
+    /// Pick a named input device, or the system default when `name` is None.
+    pub fn new_with_device(name: Option<&str>) -> Result<Self, PromptLoomError> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or(PromptLoomError::AudioUnavailable)?;
+        let device = match name {
+            Some(n) if !n.is_empty() => host
+                .input_devices()
+                .ok()
+                .and_then(|mut it| {
+                    it.find(|d| d.name().map(|dn| dn == n).unwrap_or(false))
+                })
+                .or_else(|| host.default_input_device())
+                .ok_or(PromptLoomError::AudioUnavailable)?,
+            _ => host
+                .default_input_device()
+                .ok_or(PromptLoomError::AudioUnavailable)?,
+        };
         let config = device
             .default_input_config()
             .map_err(|_| PromptLoomError::AudioUnavailable)?;

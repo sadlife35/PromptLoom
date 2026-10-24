@@ -237,29 +237,14 @@ impl Transcriber for WhisperTranscriber {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let cleaned = clean_transcript(&stdout);
 
-        // Debug: if stdout cleaning gave us nothing, log a short preview of
-        // both streams so we can see where whisper actually wrote the text.
+        // Privacy: do NOT log the transcript or any audio-derived preview.
+        // On an empty result we only log the two byte lengths so operators
+        // can tell whether whisper wrote nothing vs. we filtered everything.
         if cleaned.is_empty() {
-            // Preserve the WAV we just sent for post-mortem decoding by hand.
-            let kept = self.scratch_dir.join("last-failed.wav");
-            let _ = std::fs::copy(&wav_path, &kept);
-            tracing::info!(kept = %kept.display(), "kept failed-decode WAV for inspection");
-            let stderr_preview = String::from_utf8_lossy(&output.stderr);
-            let head = |s: &str| -> String {
-                s.lines()
-                    .take(40)
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-                    .chars()
-                    .take(2000)
-                    .collect()
-            };
             tracing::info!(
-                stdout_len = stdout.len(),
-                stderr_len = output.stderr.len(),
-                stdout_preview = %head(&stdout),
-                stderr_preview = %head(&stderr_preview),
-                "whisper produced empty transcript — logging stream previews for diagnosis"
+                stdout_bytes = output.stdout.len(),
+                stderr_bytes = output.stderr.len(),
+                "whisper produced empty transcript"
             );
         }
 

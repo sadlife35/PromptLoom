@@ -9,7 +9,9 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use promptloom_asr::download::{download_model, verify_file};
 use promptloom_asr::{load_manifest, WhisperTranscriber};
-use promptloom_audio::{LevelMeter, WasapiAudioSource};
+use promptloom_audio::{
+    default_input_device_name, enumerate_input_devices, LevelMeter, MicProbe, WasapiAudioSource,
+};
 use promptloom_core::{
     AudioBuffer, DeliveryOutcome, Notice, Orchestrator, OutputSink, PromptLoomError, State,
     TargetWindow, Transcriber,
@@ -68,6 +70,8 @@ struct AppState {
     settings_path: PathBuf,
     settings: Mutex<Settings>,
     scratch_dir: PathBuf,
+    mic_probe: Mutex<Option<MicProbe>>,
+    probe_level: Mutex<Option<LevelMeter>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -76,6 +80,29 @@ struct Settings {
     project_path: Option<String>,
     #[serde(default)]
     terms_count: usize,
+    #[serde(default)]
+    onboarding_complete: bool,
+    #[serde(default = "default_hotkey")]
+    hotkey: String,
+    #[serde(default)]
+    mic_device: Option<String>,
+}
+
+fn default_hotkey() -> String {
+    "F8".to_string()
+}
+
+/// The small safe set of hotkey options A1 allows. Keeps us well clear of
+/// arbitrary shortcut capture, per the plan.
+const ALLOWED_HOTKEYS: &[&str] = &["F8", "F9", "F10", "F2"];
+
+fn hotkey_code(name: &str) -> Code {
+    match name {
+        "F9" => Code::F9,
+        "F10" => Code::F10,
+        "F2" => Code::F2,
+        _ => Code::F8,
+    }
 }
 
 fn load_settings(path: &std::path::Path) -> Settings {
@@ -151,6 +178,121 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Settings {
     state.settings.lock().clone()
 }
 
+#[derive(Serialize, Clone)]
+struct MicListing {
+    devices: Vec<String>,
+    default: Option<String>,
+    selected: Option<String>,
+}
+
+#[tauri::command]
+fn list_microphones(state: tauri::State<'_, AppState>) -> MicListing {
+    MicListing {
+        devices: enumerate_input_devices(),
+        default: default_input_device_name(),
+        selected: state.settings.lock().mic_device.clone(),
+    }
+}
+
+#[tauri::command]
+fn set_mic_device(
+    state: tauri::State<'_, AppState>,
+    device: Option<String>,
+) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.mic_device = device.filter(|s| !s.trim().is_empty());
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn start_mic_probe(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let selected = state.settings.lock().mic_device.clone();
+    let probe = MicProbe::start(selected.as_deref()).map_err(|e| e.to_string())?;
+    *state.probe_level.lock() = Some(probe.level_meter());
+    *state.mic_probe.lock() = Some(probe);
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_mic_probe(state: tauri::State<'_, AppState>) {
+    *state.mic_probe.lock() = None;
+    *state.probe_level.lock() = None;
+}
+
+#[tauri::command]
+fn mic_probe_level(state: tauri::State<'_, AppState>) -> f32 {
+    state
+        .probe_level
+        .lock()
+        .as_ref()
+        .map(|l| l.get())
+        .unwrap_or(0.0)
+}
+
+#[tauri::command]
+fn allowed_hotkeys() -> Vec<String> {
+    ALLOWED_HOTKEYS.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[tauri::command]
+fn set_hotkey(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    hotkey: String,
+) -> Result<Settings, String> {
+    if !ALLOWED_HOTKEYS.contains(&hotkey.as_str()) {
+        return Err(format!(
+            "hotkey {hotkey:?} not in allowed set {:?}",
+            ALLOWED_HOTKEYS
+        ));
+    }
+
+    let shortcuts = app.global_shortcut();
+    // Unregister the old one, register the new one.
+    let old = {
+        let s = state.settings.lock();
+        s.hotkey.clone()
+    };
+    let _ = shortcuts.unregister(Shortcut::new(None, hotkey_code(&old)));
+    shortcuts
+        .register(Shortcut::new(None, hotkey_code(&hotkey)))
+        .map_err(|e| format!("register failed: {e}"))?;
+
+    let mut settings = state.settings.lock();
+    settings.hotkey = hotkey;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn mark_onboarding_complete(state: tauri::State<'_, AppState>) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.onboarding_complete = true;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+/// Does the stored setup still look valid? Used by the first-run guard.
+#[tauri::command]
+fn needs_onboarding(state: tauri::State<'_, AppState>) -> bool {
+    let s = state.settings.lock();
+    if !s.onboarding_complete {
+        return true;
+    }
+    // If the model vanished since last launch, send the user back to the
+    // model step. ModelStatus answers "installed+verified" more precisely.
+    let manifest = match load_manifest(&state.manifest_path) {
+        Ok(m) => m,
+        Err(_) => return true,
+    };
+    let model_path = state.model_dir.join(format!("{}.bin", manifest.name));
+    if !model_path.exists() {
+        return true;
+    }
+    verify_file(&manifest, &model_path).is_err()
+}
+
 #[tauri::command]
 fn set_project_path(
     app: AppHandle,
@@ -202,13 +344,6 @@ fn audit_privacy(state: tauri::State<'_, AppState>) -> PrivacyReport {
     if let Ok(iter) = std::fs::read_dir(dir) {
         for entry in iter.flatten() {
             let path = entry.path();
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            // Intentionally allow `last-failed.wav` through: it is a dev-mode
-            // diagnostic file written explicitly by the user's action and
-            // never ships in a release build.
-            if name == "last-failed.wav" {
-                continue;
-            }
             match path.extension().and_then(|s| s.to_str()) {
                 Some("wav") | Some("pcm") => {
                     wavs.push(path.to_string_lossy().into_owned());
@@ -332,8 +467,9 @@ fn init_orchestrator(
     app: &AppHandle,
     model_path: Option<&std::path::Path>,
     vocab: Vocabulary,
+    mic_device: Option<&str>,
 ) -> Result<(Orch, LevelMeter), PromptLoomError> {
-    let audio = WasapiAudioSource::new()?;
+    let audio = WasapiAudioSource::new_with_device(mic_device)?;
     let level = audio.level_meter();
     let transcriber = match model_path {
         Some(p) if p.exists() => match WhisperTranscriber::load(p) {
@@ -450,7 +586,11 @@ fn main() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    let hotkey = Shortcut::new(None, Code::F8);
+                    // Resolve the configured hotkey at every event so a live
+                    // change via `set_hotkey` takes effect immediately.
+                    let app_state = app.state::<AppState>();
+                    let configured = app_state.settings.lock().hotkey.clone();
+                    let hotkey = Shortcut::new(None, hotkey_code(&configured));
                     let escape = Shortcut::new(None, Code::Escape);
                     if shortcut == &hotkey {
                         on_hotkey(app, event.state());
@@ -468,6 +608,15 @@ fn main() {
             get_settings,
             set_project_path,
             audit_privacy,
+            list_microphones,
+            set_mic_device,
+            start_mic_probe,
+            stop_mic_probe,
+            mic_probe_level,
+            allowed_hotkeys,
+            set_hotkey,
+            mark_onboarding_complete,
+            needs_onboarding,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -487,19 +636,25 @@ fn main() {
                 .unwrap_or_else(Vocabulary::empty);
             settings.terms_count = vocab.len();
 
-            let (orch, level) =
-                match init_orchestrator(app.handle(), model_path.as_deref(), vocab) {
-                    Ok(ol) => (Some(ol.0), Some(ol.1)),
-                    Err(e) => {
-                        tracing::warn!(?e, "audio unavailable; app runs in degraded mode");
-                        (None, None)
-                    }
-                };
+            let mic_device = settings.mic_device.clone();
+            let (orch, level) = match init_orchestrator(
+                app.handle(),
+                model_path.as_deref(),
+                vocab,
+                mic_device.as_deref(),
+            ) {
+                Ok(ol) => (Some(ol.0), Some(ol.1)),
+                Err(e) => {
+                    tracing::warn!(?e, "audio unavailable; app runs in degraded mode");
+                    (None, None)
+                }
+            };
             let level = level.unwrap_or_default();
 
             let scratch_dir = std::env::temp_dir().join("promptloom-scratch");
             let _ = save_settings(&settings_path, &settings);
 
+            let configured_hotkey = settings.hotkey.clone();
             app.manage(AppState {
                 orch: Mutex::new(orch),
                 level: level.clone(),
@@ -508,10 +663,12 @@ fn main() {
                 settings_path,
                 settings: Mutex::new(settings),
                 scratch_dir,
+                mic_probe: Mutex::new(None),
+                probe_level: Mutex::new(None),
             });
 
             let shortcuts = app.global_shortcut();
-            let hotkey = Shortcut::new(None, Code::F8);
+            let hotkey = Shortcut::new(None, hotkey_code(&configured_hotkey));
             let escape = Shortcut::new(None, Code::Escape);
             if let Err(e) = shortcuts.register(hotkey) {
                 tracing::warn!(?e, "failed to register hold-to-talk");
