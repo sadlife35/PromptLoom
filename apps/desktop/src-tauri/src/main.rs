@@ -3,6 +3,7 @@
 mod foreground;
 
 use std::path::PathBuf;
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,11 +14,12 @@ use promptloom_audio::{
     default_input_device_name, enumerate_input_devices, LevelMeter, MicProbe, WasapiAudioSource,
 };
 use promptloom_core::{
-    AudioBuffer, DeliveryOutcome, Notice, Orchestrator, OutputSink, PromptLoomError, State,
-    TargetWindow, Transcriber,
+    state::ErrorKind, AudioBuffer, DeliveryOutcome, Notice, Orchestrator, OutputSink,
+    PromptLoomError, State, TargetWindow, Transcriber,
 };
+use promptloom_core::TextTransformer;
 use promptloom_output_windows::WindowsClipboardSink;
-use promptloom_vocabulary::Vocabulary;
+use promptloom_vocabulary::{Capitalizer, Polisher, Vocabulary};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
@@ -59,11 +61,45 @@ impl OutputSink for ClipboardAndHudSink {
     }
 }
 
+/// Composite text transformer: whisper → polish → capitalize → vocabulary.
+/// One transformer stays in the orchestrator so the state machine is
+/// unchanged. Order matters: vocabulary wins over automatic capitalization
+/// so a user's project terms always have the final word.
+struct PolishedVocabulary {
+    polisher: Polisher,
+    capitalizer: Capitalizer,
+    vocab: Vocabulary,
+}
+
+impl TextTransformer for PolishedVocabulary {
+    fn transform(&self, text: &str) -> String {
+        let polished = self.polisher.polish(text);
+        let capitalized = self.capitalizer.capitalize(&polished);
+        self.vocab.apply(&capitalized)
+    }
+}
+
 type Orch =
-    Orchestrator<WasapiAudioSource, ActiveTranscriber, Vocabulary, ClipboardAndHudSink>;
+    Orchestrator<WasapiAudioSource, ActiveTranscriber, PolishedVocabulary, ClipboardAndHudSink>;
+
+/// Commands sent to the single-threaded orchestrator worker. All work that
+/// mutates the orchestrator (press, release, cancel, vocab swap, transcriber
+/// swap) goes through this channel so no UI call ever blocks on whisper.
+enum WorkerCmd {
+    HotkeyPressed(TargetWindow),
+    HotkeyReleased,
+    EscapePressed,
+    ReloadVocabulary(Vocabulary),
+    SwapTranscriber(ActiveTranscriber),
+}
 
 struct AppState {
-    orch: Mutex<Option<Orch>>,
+    /// Send into the orchestrator worker. `try_send` so UI calls never block
+    /// if the worker is mid-transcription.
+    worker_tx: SyncSender<WorkerCmd>,
+    /// Last observed State. Updated by the worker after every event so UI
+    /// commands can answer "are we Idle?" without acquiring the orch lock.
+    state_snapshot: Arc<Mutex<State>>,
     level: LevelMeter,
     model_dir: PathBuf,
     manifest_path: PathBuf,
@@ -86,15 +122,24 @@ struct Settings {
     hotkey: String,
     #[serde(default)]
     mic_device: Option<String>,
+    #[serde(default = "default_dictation_mode")]
+    dictation_mode: String,
 }
 
 fn default_hotkey() -> String {
     "F8".to_string()
 }
 
+fn default_dictation_mode() -> String {
+    "hold".to_string()
+}
+
 /// The small safe set of hotkey options A1 allows. Keeps us well clear of
 /// arbitrary shortcut capture, per the plan.
 const ALLOWED_HOTKEYS: &[&str] = &["F8", "F9", "F10", "F2"];
+
+/// Dictation modes offered in A3. Keep this set small on purpose.
+const ALLOWED_MODES: &[&str] = &["hold", "toggle"];
 
 fn hotkey_code(name: &str) -> Code {
     match name {
@@ -150,6 +195,8 @@ struct ModelStatus {
     name: String,
     size_bytes: u64,
     verified: bool,
+    engine_installed: bool,
+    engine_path: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -160,12 +207,7 @@ struct DownloadProgress {
 
 #[tauri::command]
 fn current_state(state: tauri::State<'_, AppState>) -> String {
-    state
-        .orch
-        .lock()
-        .as_ref()
-        .map(|o| format!("{:?}", o.state()))
-        .unwrap_or_else(|| "Uninitialized".into())
+    format!("{:?}", *state.state_snapshot.lock())
 }
 
 #[tauri::command]
@@ -266,6 +308,31 @@ fn set_hotkey(
 }
 
 #[tauri::command]
+fn set_dictation_mode(
+    state: tauri::State<'_, AppState>,
+    mode: String,
+) -> Result<Settings, String> {
+    if !ALLOWED_MODES.contains(&mode.as_str()) {
+        return Err(format!(
+            "mode {mode:?} not in allowed set {:?}",
+            ALLOWED_MODES
+        ));
+    }
+    // Reject if a session is in flight. Prevents dropping the user into a
+    // half-and-half mode where Press/Release wiring disagrees with state.
+    {
+        let current = state.state_snapshot.lock().clone();
+        if !matches!(current, State::Idle) {
+            return Err("Cannot change dictation mode while a session is in progress.".into());
+        }
+    }
+    let mut settings = state.settings.lock();
+    settings.dictation_mode = mode;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
 fn mark_onboarding_complete(state: tauri::State<'_, AppState>) -> Result<Settings, String> {
     let mut settings = state.settings.lock();
     settings.onboarding_complete = true;
@@ -307,13 +374,7 @@ fn set_project_path(
     };
     let terms_count = new_vocab.len();
 
-    {
-        let mut guard = state.orch.lock();
-        if let Some(orch) = guard.as_mut() {
-            let (_, _, v, _) = orch.components();
-            *v = new_vocab;
-        }
-    }
+    let _ = state.worker_tx.try_send(WorkerCmd::ReloadVocabulary(new_vocab));
 
     let mut settings = state.settings.lock();
     settings.project_path = path.filter(|p| !p.trim().is_empty());
@@ -362,18 +423,147 @@ fn audit_privacy(state: tauri::State<'_, AppState>) -> PrivacyReport {
     }
 }
 
+fn resolve_engine_path(model_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(env) = std::env::var("PROMPTLOOM_WHISPER_BIN") {
+        let p = PathBuf::from(env);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    for name in &["whisper-cli.exe", "main.exe", "whisper-cli", "main"] {
+        let p = model_dir.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[tauri::command]
 fn model_status(state: tauri::State<'_, AppState>) -> Result<ModelStatus, String> {
     let manifest = load_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
     let path = state.model_dir.join(format!("{}.bin", manifest.name));
     let installed = path.exists();
     let verified = installed && verify_file(&manifest, &path).is_ok();
+    let engine_path = resolve_engine_path(&state.model_dir);
+    let engine_installed = engine_path.is_some();
     Ok(ModelStatus {
         installed,
         path: path.to_string_lossy().into(),
         name: manifest.name,
         size_bytes: manifest.size_bytes,
         verified,
+        engine_installed,
+        engine_path: engine_path.map(|p| p.to_string_lossy().into()),
+    })
+}
+
+#[derive(Serialize, Clone)]
+struct VerifyReport {
+    ok: bool,
+    message: String,
+}
+
+#[tauri::command]
+fn verify_model_cmd(state: tauri::State<'_, AppState>) -> Result<VerifyReport, String> {
+    let manifest = load_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
+    let path = state.model_dir.join(format!("{}.bin", manifest.name));
+    if !path.exists() {
+        return Ok(VerifyReport {
+            ok: false,
+            message: "Model not installed.".into(),
+        });
+    }
+    // Purely local: hashes bytes on disk. No network.
+    match verify_file(&manifest, &path) {
+        Ok(()) => Ok(VerifyReport {
+            ok: true,
+            message: "SHA-256 matches manifest. Model is intact.".into(),
+        }),
+        Err(e) => Ok(VerifyReport {
+            ok: false,
+            message: format!("Verification failed: {e}"),
+        }),
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct RemoveReport {
+    removed: bool,
+    path: String,
+    message: String,
+}
+
+#[tauri::command]
+fn remove_model_cmd(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    confirm: bool,
+) -> Result<RemoveReport, String> {
+    if !confirm {
+        return Err("Confirmation required to remove the model.".into());
+    }
+
+    let manifest = load_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
+    let model_dir = &state.model_dir;
+    let path = model_dir.join(format!("{}.bin", manifest.name));
+
+    // Safety: both paths must be canonicalizable and the model file must be
+    // strictly inside the managed model directory. Rejects any symlink or
+    // walk-out attempt even though the UI never passes a path.
+    let dir_canon = std::fs::canonicalize(model_dir).map_err(|e| {
+        format!("Model directory not accessible: {e}")
+    })?;
+    if !path.exists() {
+        return Ok(RemoveReport {
+            removed: false,
+            path: path.to_string_lossy().into(),
+            message: "Model file not present; nothing to remove.".into(),
+        });
+    }
+    let path_canon =
+        std::fs::canonicalize(&path).map_err(|e| format!("Model path invalid: {e}"))?;
+    if !path_canon.starts_with(&dir_canon) {
+        return Err(format!(
+            "Refused to remove: {path_canon:?} is not inside managed model directory {dir_canon:?}"
+        ));
+    }
+    if path_canon
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("bin"))
+        != Some(true)
+    {
+        return Err("Refused to remove: only .bin model files may be removed.".into());
+    }
+
+    // Release any lingering reference to the model BEFORE deleting the file
+    // on Windows. The worker thread swaps and takes ownership of the drop.
+    let _ = state
+        .worker_tx
+        .try_send(WorkerCmd::SwapTranscriber(ActiveTranscriber::Placeholder));
+    tracing::info!("transcriber swap-to-placeholder dispatched for model removal");
+
+    std::fs::remove_file(&path_canon).map_err(|e| format!("Delete failed: {e}"))?;
+
+    // Also remove any lingering .part partial download, if present.
+    let part = path.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+
+    // Flip onboarding_complete back to false so the user is routed to the
+    // Model setup step on next launch, matching the plan's "removing a model
+    // returns the app to the model setup state."
+    let mut settings = state.settings.lock();
+    settings.onboarding_complete = false;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    drop(settings);
+
+    let _ = app.emit("promptloom:notice", "model removed");
+
+    Ok(RemoveReport {
+        removed: true,
+        path: path.to_string_lossy().into(),
+        message: "Model removed. Reinstall from the Model section when ready.".into(),
     })
 }
 
@@ -417,13 +607,11 @@ fn reload_transcriber(app: &AppHandle, model_path: &std::path::Path) {
     match WhisperTranscriber::load(model_path) {
         Ok(w) => {
             let app_state = app.state::<AppState>();
-            let mut guard = app_state.orch.lock();
-            if let Some(orch) = guard.as_mut() {
-                let (_, t, _, _) = orch.components();
-                *t = ActiveTranscriber::Whisper(w);
-                tracing::info!("whisper transcriber loaded and swapped in");
-                let _ = app.emit("promptloom:notice", "model loaded");
-            }
+            let _ = app_state
+                .worker_tx
+                .try_send(WorkerCmd::SwapTranscriber(ActiveTranscriber::Whisper(w)));
+            tracing::info!("whisper transcriber load dispatched to worker");
+            let _ = app.emit("promptloom:notice", "model loaded");
         }
         Err(e) => {
             tracing::warn!(?e, "whisper load failed");
@@ -436,6 +624,127 @@ fn drain_notices(app: &AppHandle, notices: Vec<Notice>) {
     for n in notices {
         let _ = app.emit("promptloom:notice", format!("{n:?}"));
     }
+}
+
+/// User-visible phase that the UI renders. Shape kept flat so the TS side
+/// can read `phase.kind` and `phase.detail` without deep pattern matching.
+#[derive(Serialize, Clone)]
+struct Phase {
+    kind: &'static str,
+    label: String,
+    detail: String,
+}
+
+fn phase_for(state: &State, notices: &[Notice]) -> Phase {
+    // Terminal notices take precedence over the mechanical state.
+    if let Some(n) = notices.last() {
+        match n {
+            Notice::Delivered(DeliveryOutcome::Pasted) => {
+                return Phase {
+                    kind: "delivered",
+                    label: "Delivered".into(),
+                    detail: "Pasted into the focused window.".into(),
+                }
+            }
+            Notice::Delivered(DeliveryOutcome::CopyOnly { reason }) => {
+                return Phase {
+                    kind: "copied_only",
+                    label: "Copied only".into(),
+                    detail: format!("{reason}. Text is on the clipboard."),
+                }
+            }
+            Notice::Delivered(DeliveryOutcome::Failed) => {
+                return Phase {
+                    kind: "error",
+                    label: "Could not deliver".into(),
+                    detail: "Try again, or paste the clipboard with Ctrl+V.".into(),
+                };
+            }
+            Notice::Cancelled | Notice::TooShort => {
+                return Phase {
+                    kind: "cancelled",
+                    label: "Cancelled".into(),
+                    detail: "Audio discarded. Nothing delivered.".into(),
+                };
+            }
+            Notice::Error(kind) => return error_phase(*kind),
+        }
+    }
+    match state {
+        State::Idle => Phase {
+            kind: "ready",
+            label: "Ready".into(),
+            detail: "Hold the hotkey to dictate.".into(),
+        },
+        State::Recording { .. } => Phase {
+            kind: "recording",
+            label: "Recording".into(),
+            detail: "Listening — release to transcribe.".into(),
+        },
+        State::Finalizing { .. } | State::Transcribing { .. } => Phase {
+            kind: "processing",
+            label: "Processing locally".into(),
+            detail: "Transcribing on this PC.".into(),
+        },
+        State::Correcting { .. } | State::Delivering { .. } => Phase {
+            kind: "processing",
+            label: "Delivering".into(),
+            detail: "Pasting into the focused window.".into(),
+        },
+    }
+}
+
+fn error_phase(kind: ErrorKind) -> Phase {
+    let (label, detail) = match kind {
+        ErrorKind::NoMicrophone => (
+            "No microphone",
+            "Plug one in or check Windows Sound settings, then try again.",
+        ),
+        ErrorKind::ModelMissing => (
+            "Model not installed",
+            "Open Settings and reinstall the local speech model.",
+        ),
+        ErrorKind::TranscriptionFailed => (
+            "Transcription failed",
+            "Try again. Speak closer to the mic and give it 1–2 seconds.",
+        ),
+        ErrorKind::TargetUnavailable => (
+            "No window to paste into",
+            "Click back into the app you want to dictate into, then try again.",
+        ),
+        ErrorKind::DeliveryFailed => (
+            "Could not paste",
+            "The text is on your clipboard — paste it manually with Ctrl+V.",
+        ),
+    };
+    Phase {
+        kind: "error",
+        label: label.into(),
+        detail: detail.into(),
+    }
+}
+
+fn emit_phase(app: &AppHandle, state: &State, notices: &[Notice]) {
+    let phase = phase_for(state, notices);
+    update_tray_tooltip(app, &phase);
+    let _ = app.emit("promptloom:phase", phase);
+}
+
+/// Best-effort tray-tooltip update. Silent on platforms where tray isn't
+/// managed (release builds without the tray-icon feature, headless CI).
+fn update_tray_tooltip(app: &AppHandle, phase: &Phase) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(format!("PromptLoom — {}", phase.label)));
+    }
+}
+
+/// Schedule the HUD to hide after `delay`. Used for terminal phases so the
+/// user actually sees the confirmation before it disappears.
+fn schedule_hide_hud(app: AppHandle, delay: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        hide_hud(&app);
+    });
 }
 
 fn show_hud(app: &AppHandle) {
@@ -491,50 +800,150 @@ fn init_orchestrator(
         inner: WindowsClipboardSink::default(),
         app: app.clone(),
     };
-    let orch = Orchestrator::new(audio, transcriber, vocab, sink);
+    let text_transformer = PolishedVocabulary {
+        polisher: Polisher::default(),
+        capitalizer: Capitalizer::default(),
+        vocab,
+    };
+    let orch = Orchestrator::new(audio, transcriber, text_transformer, sink);
     Ok((orch, level))
 }
 
 fn on_hotkey(app: &AppHandle, state: ShortcutState) {
     let app_state = app.state::<AppState>();
-    let mut guard = app_state.orch.lock();
-    let Some(orch) = guard.as_mut() else {
-        return;
-    };
+    let mode = app_state.settings.lock().dictation_mode.clone();
+    let is_toggle = mode == "toggle";
+    let current = app_state.state_snapshot.lock().clone();
 
-    match state {
-        ShortcutState::Pressed => {
+    match (is_toggle, state) {
+        // Hold-to-talk
+        (false, ShortcutState::Pressed) => {
             let Some(target) = foreground::capture_foreground() else {
                 tracing::warn!("no foreground window at hotkey press");
                 return;
             };
-            if matches!(orch.state(), State::Idle) {
-                orch.press(target);
+            if matches!(current, State::Idle) {
+                let _ = app_state
+                    .worker_tx
+                    .try_send(WorkerCmd::HotkeyPressed(target));
                 show_hud(app);
             }
         }
-        ShortcutState::Released => {
-            if !matches!(orch.state(), State::Idle) {
-                orch.release();
+        (false, ShortcutState::Released) => {
+            if !matches!(current, State::Idle) {
+                let _ = app_state.worker_tx.try_send(WorkerCmd::HotkeyReleased);
             }
-            hide_hud(app);
         }
-    }
 
-    drain_notices(app, orch.take_notices());
-    let _ = app.emit("promptloom:state", format!("{:?}", orch.state()));
+        // Toggle
+        (true, ShortcutState::Pressed) => match current {
+            State::Idle => {
+                let Some(target) = foreground::capture_foreground() else {
+                    tracing::warn!("no foreground window at hotkey press");
+                    return;
+                };
+                let _ = app_state
+                    .worker_tx
+                    .try_send(WorkerCmd::HotkeyPressed(target));
+                show_hud(app);
+            }
+            State::Recording { .. } => {
+                let _ = app_state.worker_tx.try_send(WorkerCmd::HotkeyReleased);
+            }
+            _ => {
+                tracing::debug!(?current, "toggle press ignored: session mid-processing");
+            }
+        },
+        (true, ShortcutState::Released) => { /* ignored in toggle mode */ }
+    }
 }
 
 fn on_escape(app: &AppHandle) {
     let app_state = app.state::<AppState>();
-    let mut guard = app_state.orch.lock();
-    if let Some(orch) = guard.as_mut() {
-        if !matches!(orch.state(), State::Idle) {
-            orch.cancel();
-            hide_hud(app);
-            drain_notices(app, orch.take_notices());
+    let current = app_state.state_snapshot.lock().clone();
+    if !matches!(current, State::Idle) {
+        let _ = app_state.worker_tx.try_send(WorkerCmd::EscapePressed);
+    }
+}
+
+/// The orchestrator worker. Owns `Orch` exclusively; receives commands via
+/// an mpsc channel. All blocking work (whisper subprocess, clipboard) runs
+/// here, off the Tauri command threads, so the UI stays responsive.
+fn spawn_orchestrator_worker(
+    mut orch: Orch,
+    rx: std::sync::mpsc::Receiver<WorkerCmd>,
+    app: AppHandle,
+    state_snapshot: Arc<Mutex<State>>,
+) {
+    std::thread::Builder::new()
+        .name("promptloom-orch".into())
+        .spawn(move || {
+            while let Ok(cmd) = rx.recv() {
+                match cmd {
+                    WorkerCmd::HotkeyPressed(target) => orch.press(target),
+                    WorkerCmd::HotkeyReleased => {
+                        // Flash "Processing locally" before whisper blocks.
+                        let processing = Phase {
+                            kind: "processing",
+                            label: "Processing locally".into(),
+                            detail: "Transcribing on this PC.".into(),
+                        };
+                        update_tray_tooltip(&app, &processing);
+                        let _ = app.emit("promptloom:phase", processing);
+                        orch.release();
+                    }
+                    WorkerCmd::EscapePressed => orch.cancel(),
+                    WorkerCmd::ReloadVocabulary(v) => {
+                        let (_, _, text_slot, _) = orch.components();
+                        text_slot.vocab = v;
+                        tracing::info!("vocabulary swapped in by worker");
+                        continue; // No state change; skip emit path.
+                    }
+                    WorkerCmd::SwapTranscriber(t) => {
+                        let (_, trans_slot, _, _) = orch.components();
+                        *trans_slot = t;
+                        tracing::info!("transcriber swapped in by worker");
+                        continue;
+                    }
+                }
+
+                let notices = orch.take_notices();
+                let final_state = orch.state().clone();
+                *state_snapshot.lock() = final_state.clone();
+
+                drain_notices(&app, notices.clone());
+                emit_phase(&app, &final_state, &notices);
+                let _ = app.emit("promptloom:state", format!("{:?}", final_state));
+
+                if has_terminal_notice(&notices) {
+                    let dwell = terminal_dwell(&notices);
+                    schedule_hide_hud(app.clone(), dwell);
+                }
+            }
+        })
+        .expect("failed to spawn orchestrator worker");
+}
+
+fn has_terminal_notice(notices: &[Notice]) -> bool {
+    notices
+        .iter()
+        .any(|n| matches!(n, Notice::Delivered(_) | Notice::Cancelled | Notice::TooShort | Notice::Error(_)))
+}
+
+fn terminal_dwell(notices: &[Notice]) -> Duration {
+    for n in notices {
+        match n {
+            Notice::Delivered(DeliveryOutcome::Pasted) => return Duration::from_millis(900),
+            Notice::Delivered(DeliveryOutcome::CopyOnly { .. }) => {
+                return Duration::from_millis(1600);
+            }
+            Notice::Error(_) | Notice::Delivered(DeliveryOutcome::Failed) => {
+                return Duration::from_millis(2400);
+            }
+            Notice::Cancelled | Notice::TooShort => return Duration::from_millis(600),
         }
     }
+    Duration::from_millis(900)
 }
 
 fn resolve_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
@@ -615,8 +1024,11 @@ fn main() {
             mic_probe_level,
             allowed_hotkeys,
             set_hotkey,
+            set_dictation_mode,
             mark_onboarding_complete,
             needs_onboarding,
+            verify_model_cmd,
+            remove_model_cmd,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -637,7 +1049,7 @@ fn main() {
             settings.terms_count = vocab.len();
 
             let mic_device = settings.mic_device.clone();
-            let (orch, level) = match init_orchestrator(
+            let (orch_opt, level) = match init_orchestrator(
                 app.handle(),
                 model_path.as_deref(),
                 vocab,
@@ -655,8 +1067,24 @@ fn main() {
             let _ = save_settings(&settings_path, &settings);
 
             let configured_hotkey = settings.hotkey.clone();
+
+            // Build the worker channel. If audio is unavailable the worker
+            // never spawns, and command sends silently drop at the receiver's
+            // disconnect — safe degraded mode.
+            let (worker_tx, worker_rx) = sync_channel::<WorkerCmd>(32);
+            let state_snapshot = Arc::new(Mutex::new(State::Idle));
+            if let Some(orch) = orch_opt {
+                spawn_orchestrator_worker(
+                    orch,
+                    worker_rx,
+                    app.handle().clone(),
+                    state_snapshot.clone(),
+                );
+            }
+
             app.manage(AppState {
-                orch: Mutex::new(orch),
+                worker_tx,
+                state_snapshot,
                 level: level.clone(),
                 model_dir,
                 manifest_path,
@@ -678,6 +1106,10 @@ fn main() {
             }
 
             start_level_pump(app.handle().clone(), level);
+
+            // Initial status so the UI shows "Ready" immediately.
+            emit_phase(app.handle(), &State::Idle, &[]);
+
             Ok(())
         })
         .run(tauri::generate_context!())

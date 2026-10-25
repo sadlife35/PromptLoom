@@ -62,9 +62,7 @@ impl WasapiAudioSource {
             Some(n) if !n.is_empty() => host
                 .input_devices()
                 .ok()
-                .and_then(|mut it| {
-                    it.find(|d| d.name().map(|dn| dn == n).unwrap_or(false))
-                })
+                .and_then(|mut it| it.find(|d| d.name().map(|dn| dn == n).unwrap_or(false)))
                 .or_else(|| host.default_input_device())
                 .ok_or(PromptLoomError::AudioUnavailable)?,
             _ => host
@@ -92,10 +90,7 @@ impl WasapiAudioSource {
         self.overflow_count.load(Ordering::Relaxed)
     }
 
-    fn build_stream(
-        &self,
-        tx: SyncSender<Vec<i16>>,
-    ) -> Result<Stream, PromptLoomError> {
+    fn build_stream(&self, tx: SyncSender<Vec<i16>>) -> Result<Stream, PromptLoomError> {
         let input_rate = self.config.sample_rate().0;
         let channels = self.config.channels() as usize;
         let overflow = self.overflow_count.clone();
@@ -107,14 +102,7 @@ impl WasapiAudioSource {
             SampleFormat::F32 => self.device.build_input_stream(
                 &self.config.config(),
                 move |data: &[f32], _| {
-                    push_chunk(
-                        data,
-                        channels,
-                        input_rate,
-                        &tx,
-                        &overflow,
-                        &level,
-                    );
+                    push_chunk(data, channels, input_rate, &tx, &overflow, &level);
                 },
                 err_fn,
                 None,
@@ -124,18 +112,9 @@ impl WasapiAudioSource {
                 dev.build_input_stream(
                     &self.config.config(),
                     move |data: &[i16], _| {
-                        let as_f32: Vec<f32> = data
-                            .iter()
-                            .map(|s| *s as f32 / i16::MAX as f32)
-                            .collect();
-                        push_chunk(
-                            &as_f32,
-                            channels,
-                            input_rate,
-                            &tx,
-                            &overflow,
-                            &level,
-                        );
+                        let as_f32: Vec<f32> =
+                            data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
+                        push_chunk(&as_f32, channels, input_rate, &tx, &overflow, &level);
                     },
                     err_fn,
                     None,
@@ -150,14 +129,7 @@ impl WasapiAudioSource {
                             .iter()
                             .map(|s| (*s as f32 - 32_768.0) / 32_768.0)
                             .collect();
-                        push_chunk(
-                            &as_f32,
-                            channels,
-                            input_rate,
-                            &tx,
-                            &overflow,
-                            &level,
-                        );
+                        push_chunk(&as_f32, channels, input_rate, &tx, &overflow, &level);
                     },
                     err_fn,
                     None,
@@ -214,7 +186,10 @@ impl AudioSource for WasapiAudioSource {
 
     fn stop(&mut self) -> Result<AudioBuffer, PromptLoomError> {
         self.stream.take();
-        let rx = self.receiver.take().ok_or(PromptLoomError::AudioUnavailable)?;
+        let rx = self
+            .receiver
+            .take()
+            .ok_or(PromptLoomError::AudioUnavailable)?;
         let mut samples = Vec::new();
         while let Ok(chunk) = rx.try_recv() {
             samples.extend_from_slice(&chunk);

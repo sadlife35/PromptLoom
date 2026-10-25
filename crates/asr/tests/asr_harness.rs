@@ -63,6 +63,7 @@ fn normalize(text: &str, rules: &[String]) -> String {
     s.trim().to_string()
 }
 
+#[allow(clippy::needless_range_loop)]
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -92,9 +93,8 @@ fn load_expectations() -> Expectations {
 }
 
 fn load_transcriber() -> WhisperTranscriber {
-    let model = model_path().expect(
-        "set PROMPTLOOM_MODEL_PATH to the local ggml-base.en.bin before running --ignored",
-    );
+    let model = model_path()
+        .expect("set PROMPTLOOM_MODEL_PATH to the local ggml-base.en.bin before running --ignored");
     WhisperTranscriber::load(&model).expect("model failed to load")
 }
 

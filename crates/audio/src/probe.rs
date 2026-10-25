@@ -88,8 +88,7 @@ fn build_probe_stream(
         SampleFormat::I16 => device.build_input_stream(
             &config.config(),
             move |data: &[i16], _| {
-                let as_f32: Vec<f32> =
-                    data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
+                let as_f32: Vec<f32> = data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
                 let samples =
                     downmix_and_resample(&as_f32, channels, input_rate, TARGET_SAMPLE_RATE_HZ);
                 level.set(rms_level(&samples));

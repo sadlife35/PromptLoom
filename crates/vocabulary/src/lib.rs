@@ -1,5 +1,11 @@
 //! promptloom-vocabulary: parse `.promptloom/terms.yml` and apply
-//! deterministic case-insensitive longest-match replacements.
+//! deterministic case-insensitive longest-match replacements. Also hosts
+//! the transcript polisher (filler stripping, repeat-loop collapse,
+//! whitespace normalization) in `polish`.
+
+pub mod polish;
+
+pub use polish::{Capitalizer, Polisher};
 
 use std::path::Path;
 

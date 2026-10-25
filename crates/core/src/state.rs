@@ -122,8 +122,10 @@ impl Session {
                 vec![Effect::DiscardBuffer, Effect::Notify(Notice::Cancelled)]
             }
 
-            // Hotkey release after an invalid capture (too short, bad device)
-            (Recording { .. }, CaptureInvalid) => {
+            // Invalid capture discovered either during recording (device
+            // loss) or at stop-capture time when the buffer turned out too
+            // short to be worth transcribing.
+            (Recording { .. } | Finalizing { .. }, CaptureInvalid) => {
                 self.state = Idle;
                 vec![Effect::DiscardBuffer, Effect::Notify(Notice::TooShort)]
             }

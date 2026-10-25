@@ -39,13 +39,30 @@
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     },
     "trayIcon": {
+      "id": "main",
       "iconPath": "icons/icon.png",
       "iconAsTemplate": true,
-      "tooltip": "PromptLoom"
+      "tooltip": "PromptLoom — starting…"
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "PromptLoom contributors",
+    "shortDescription": "Local-only Windows dictation",
+    "longDescription": "PromptLoom is a local Windows dictation prototype. Hold a hotkey, speak, release — text is transcribed locally with whisper.cpp and pasted into the window you were focused on. No account, no cloud, no telemetry.",
+    "copyright": "Copyright 2026 PromptLoom contributors",
+    "category": "Productivity",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

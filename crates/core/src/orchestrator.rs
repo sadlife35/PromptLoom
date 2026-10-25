@@ -92,19 +92,17 @@ where
                     queue.push(Event::Error(err));
                 }
             }
-            Effect::StopCapture => {
-                match self.audio.stop() {
-                    Ok(buffer) => {
-                        if buffer.is_too_short(MIN_UTTERANCE) {
-                            queue.push(Event::CaptureInvalid);
-                        } else {
-                            self.buffer = Some(buffer);
-                            queue.push(Event::AudioFinalized);
-                        }
+            Effect::StopCapture => match self.audio.stop() {
+                Ok(buffer) => {
+                    if buffer.is_too_short(MIN_UTTERANCE) {
+                        queue.push(Event::CaptureInvalid);
+                    } else {
+                        self.buffer = Some(buffer);
+                        queue.push(Event::AudioFinalized);
                     }
-                    Err(err) => queue.push(Event::Error(err)),
                 }
-            }
+                Err(err) => queue.push(Event::Error(err)),
+            },
             Effect::DiscardBuffer => {
                 self.audio.cancel();
                 self.buffer = None;
@@ -155,6 +153,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeliveryOutcome;
     use std::sync::{Arc, Mutex};
 
     /// Minimal fakes local to this module so the orchestrator can be exercised
@@ -172,9 +171,7 @@ mod tests {
             Ok(())
         }
         fn stop(&mut self) -> Result<AudioBuffer, PromptLoomError> {
-            self.buffer
-                .take()
-                .ok_or(PromptLoomError::AudioUnavailable)
+            self.buffer.take().ok_or(PromptLoomError::AudioUnavailable)
         }
         fn cancel(&mut self) {
             self.cancelled = true;
@@ -209,9 +206,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((text.to_string(), target.clone()));
-            self.outcome
-                .clone()
-                .unwrap_or(DeliveryOutcome::Pasted)
+            self.outcome.clone().unwrap_or(DeliveryOutcome::Pasted)
         }
     }
 

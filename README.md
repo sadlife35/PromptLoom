@@ -42,12 +42,12 @@ For the desktop shell:
 
 - `cargo install tauri-cli --version "^2.0.0"`
 
-## Build and test
+## How to run from source (developer)
 
 Core crates (ship gate — no microphone, model, or network):
 
 ```powershell
-cargo test --workspace
+cargo test --workspace --all-targets
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -60,15 +60,77 @@ npm install
 cargo tauri dev
 ```
 
-In the Settings window click **Download model (one-time)**. The ~148 MB
-`ggml-base.en` streams in with a progress bar and is SHA-256-verified before
-being renamed into place. After it loads, hold **F8**, speak, and release —
-the transcript appears briefly in the HUD and in Settings' "Last transcript"
-panel. Nothing is persisted.
+In the Settings window the first-run wizard appears. Walk through Privacy →
+Microphone → Model (click **Download**, ~148 MB) → Shortcut → Vocabulary →
+Finish. Then hold **F8** in Notepad, speak, release — text appears.
 
 The desktop crate (`apps/desktop/src-tauri`) is intentionally **outside** the
 default Cargo workspace so that the workspace ship-gate `cargo test` does not
 require Tauri/WebView2/Node to be installed.
+
+## How to build a release installer
+
+Produces a Windows NSIS `.exe` installer in
+`apps/desktop/src-tauri/target/release/bundle/nsis/`.
+
+**One-time: generate icons** (Tauri's bundler won't start without them):
+
+```powershell
+cd apps/desktop
+# Any square PNG >= 1024x1024 works. Transparent background preferred.
+cargo tauri icon path\to\your-logo.png
+```
+
+**Then build:**
+
+```powershell
+cd apps/desktop
+npm install
+cargo tauri build
+```
+
+First build downloads NSIS once (~1–2 min). Subsequent builds skip that.
+
+**Checksum the installer:**
+
+```powershell
+Get-FileHash .\src-tauri\target\release\bundle\nsis\PromptLoom_0.1.0-alpha.1_x64-setup.exe -Algorithm SHA256
+```
+
+## How to use the alpha (non-technical tester)
+
+1. Download `PromptLoom_0.1.0-alpha.1_x64-setup.exe` and the published SHA-256
+   from the release page.
+2. (Optional, recommended) Verify the SHA-256 matches:
+   ```powershell
+   Get-FileHash .\PromptLoom_0.1.0-alpha.1_x64-setup.exe -Algorithm SHA256
+   ```
+3. Double-click the installer. **Windows SmartScreen will warn** (unsigned
+   alpha). Click **"More info" → "Run anyway"** to continue.
+4. Launch PromptLoom from the Start menu. The first-run wizard appears.
+   Walk through all six steps. The Model step downloads ~148 MB — this is
+   the only network traffic the app ever makes.
+5. Open **Notepad**. Click into the empty window so it has keyboard focus.
+   Hold **F8**, say "the deploy pipeline runs on Tuesday", release. Text
+   appears.
+6. Press **Esc** while holding F8 to cancel a dictation.
+
+Full user docs: [`RELEASE_NOTES.md`](RELEASE_NOTES.md).
+
+## Developer verification pass
+
+Before cutting a release artifact, run:
+
+```powershell
+cargo test --workspace --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cd apps/desktop
+npm install
+cargo tauri build
+```
+
+All five must succeed with no warnings before the installer is shippable.
 
 ## Run the ASR fixture harness (optional)
 

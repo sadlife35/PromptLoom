@@ -16,16 +16,14 @@ pub enum WavFixtureError {
 
 /// Read a WAV file and normalize it to 16 kHz mono PCM16. Linear resample.
 pub fn load_wav_fixture(path: &Path) -> Result<AudioBuffer, WavFixtureError> {
-    let mut reader = hound::WavReader::open(path).map_err(|e| WavFixtureError::Read(e.to_string()))?;
+    let mut reader =
+        hound::WavReader::open(path).map_err(|e| WavFixtureError::Read(e.to_string()))?;
     let spec = reader.spec();
     let channels = spec.channels as usize;
     let rate = spec.sample_rate;
 
     let samples_i16: Vec<i16> = match (spec.sample_format, spec.bits_per_sample) {
-        (hound::SampleFormat::Int, 16) => reader
-            .samples::<i16>()
-            .filter_map(|s| s.ok())
-            .collect(),
+        (hound::SampleFormat::Int, 16) => reader.samples::<i16>().filter_map(|s| s.ok()).collect(),
         (hound::SampleFormat::Int, 32) => reader
             .samples::<i32>()
             .filter_map(|s| s.ok())

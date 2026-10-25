@@ -19,6 +19,14 @@ models/*.gguf
 # ASR fixtures are user-consented recordings; never committed.
 crates/asr/tests/fixtures/*.wav
 
+# Generated Tauri icons (regenerate with `cargo tauri icon <source.png>`)
+apps/desktop/src-tauri/icons/*.png
+apps/desktop/src-tauri/icons/*.ico
+apps/desktop/src-tauri/icons/*.icns
+
+# Release bundle artifacts
+apps/desktop/src-tauri/target/release/bundle/
+
 # OS
 Thumbs.db
 .DS_Store

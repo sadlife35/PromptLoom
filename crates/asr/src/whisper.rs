@@ -130,14 +130,12 @@ fn write_wav(path: &Path, samples: &[i16]) -> Result<(), WhisperError> {
     let mut buf: Vec<u8> = Vec::with_capacity(44 + samples.len() * 2);
     {
         let cursor = std::io::Cursor::new(&mut buf);
-        let mut w = WavWriter::new(cursor, spec)
-            .map_err(|e| WhisperError::Wav(e.to_string()))?;
+        let mut w = WavWriter::new(cursor, spec).map_err(|e| WhisperError::Wav(e.to_string()))?;
         for &s in samples {
             w.write_sample(s)
                 .map_err(|e| WhisperError::Wav(e.to_string()))?;
         }
-        w.finalize()
-            .map_err(|e| WhisperError::Wav(e.to_string()))?;
+        w.finalize().map_err(|e| WhisperError::Wav(e.to_string()))?;
     }
     // One atomic file write; file is closed before this function returns.
     std::fs::write(path, &buf).map_err(WhisperError::Io)?;
@@ -191,6 +189,11 @@ impl Transcriber for WhisperTranscriber {
             return Err(WhisperError::WrongSampleRate(audio.sample_rate_hz).into());
         }
 
+        // Make sure the scratch dir exists on every call. Windows temp cleanup
+        // or the user's "clear" scripts can delete it between app launch and
+        // the next dictation; we recreate silently rather than fail.
+        std::fs::create_dir_all(&self.scratch_dir).map_err(WhisperError::Io)?;
+
         // Reserve a .wav scratch path, then CLOSE the tempfile's handle
         // before writing. Keeping the NamedTempFile's handle open while the
         // whisper subprocess tried to read the same path raced miniaudio's
@@ -209,9 +212,7 @@ impl Transcriber for WhisperTranscriber {
 
         let mut cmd = Command::new(&self.binary_path);
         cmd.args([
-            "-m", &model_s,
-            "-f", &wav_s,
-            "-nt", // no timestamps
+            "-m", &model_s, "-f", &wav_s, "-nt", // no timestamps
             "-np", // no progress
         ]);
         if let Some(lang) = &self.language {
@@ -222,7 +223,9 @@ impl Transcriber for WhisperTranscriber {
         }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let output = cmd.output().map_err(|e| WhisperError::Spawn(e.to_string()))?;
+        let output = cmd
+            .output()
+            .map_err(|e| WhisperError::Spawn(e.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -279,8 +282,13 @@ mod tests {
         assert_eq!(clean_transcript("just text"), "just text");
     }
 
+    /// Shared mutex so the two tests below don't race on the global
+    /// PROMPTLOOM_WHISPER_BIN env var (cargo runs tests in parallel).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_binary_env_var_wins() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::env::set_var("PROMPTLOOM_WHISPER_BIN", tmp.path());
         let fake_model = tempfile::NamedTempFile::new().unwrap();
@@ -291,12 +299,13 @@ mod tests {
 
     #[test]
     fn resolve_binary_falls_back_to_sibling() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("PROMPTLOOM_WHISPER_BIN");
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("ggml-base.en.bin");
         std::fs::write(&model, b"not a real model").unwrap();
         let bin = dir.path().join("whisper-cli.exe");
         std::fs::write(&bin, b"").unwrap();
-        std::env::remove_var("PROMPTLOOM_WHISPER_BIN");
         assert_eq!(resolve_binary(&model).unwrap(), bin);
     }
 }
