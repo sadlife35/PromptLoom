@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use promptloom_asr::download::{download_model, verify_file};
-use promptloom_asr::{load_manifest, WhisperTranscriber};
+use promptloom_asr::{find_model, load_all_manifest, load_manifest, WhisperTranscriber};
 use promptloom_audio::{
     default_input_device_name, enumerate_input_devices, LevelMeter, MicProbe, WasapiAudioSource,
 };
@@ -124,6 +124,12 @@ struct Settings {
     mic_device: Option<String>,
     #[serde(default = "default_dictation_mode")]
     dictation_mode: String,
+    #[serde(default = "default_active_model")]
+    active_model: String,
+}
+
+fn default_active_model() -> String {
+    "ggml-base.en".to_string()
 }
 
 fn default_hotkey() -> String {
@@ -347,9 +353,9 @@ fn needs_onboarding(state: tauri::State<'_, AppState>) -> bool {
     if !s.onboarding_complete {
         return true;
     }
-    // If the model vanished since last launch, send the user back to the
-    // model step. ModelStatus answers "installed+verified" more precisely.
-    let manifest = match load_manifest(&state.manifest_path) {
+    // If the active model vanished since last launch, send the user back to
+    // the model step. ModelStatus answers "installed+verified" more precisely.
+    let manifest = match find_model(&state.manifest_path, &s.active_model) {
         Ok(m) => m,
         Err(_) => return true,
     };
@@ -441,7 +447,9 @@ fn resolve_engine_path(model_dir: &std::path::Path) -> Option<PathBuf> {
 
 #[tauri::command]
 fn model_status(state: tauri::State<'_, AppState>) -> Result<ModelStatus, String> {
-    let manifest = load_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
+    // Backward-compatible: reports the currently selected model.
+    let active = state.settings.lock().active_model.clone();
+    let manifest = find_model(&state.manifest_path, &active).map_err(|e| e.to_string())?;
     let path = state.model_dir.join(format!("{}.bin", manifest.name));
     let installed = path.exists();
     let verified = installed && verify_file(&manifest, &path).is_ok();
@@ -456,6 +464,75 @@ fn model_status(state: tauri::State<'_, AppState>) -> Result<ModelStatus, String
         engine_installed,
         engine_path: engine_path.map(|p| p.to_string_lossy().into()),
     })
+}
+
+#[derive(Serialize, Clone)]
+struct ModelSummary {
+    name: String,
+    size_bytes: u64,
+    note: Option<String>,
+    installed: bool,
+    verified: bool,
+    is_active: bool,
+}
+
+#[tauri::command]
+fn list_models(state: tauri::State<'_, AppState>) -> Result<Vec<ModelSummary>, String> {
+    let active = state.settings.lock().active_model.clone();
+    let manifests = load_all_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
+    Ok(manifests
+        .into_iter()
+        .map(|m| {
+            let path = state.model_dir.join(format!("{}.bin", m.name));
+            let installed = path.exists();
+            let verified = installed && verify_file(&m, &path).is_ok();
+            ModelSummary {
+                is_active: m.name == active,
+                installed,
+                verified,
+                name: m.name,
+                size_bytes: m.size_bytes,
+                note: m.note,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn set_active_model(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<Settings, String> {
+    let manifest = find_model(&state.manifest_path, &name).map_err(|e| e.to_string())?;
+    let path = state.model_dir.join(format!("{}.bin", manifest.name));
+
+    // Persist the choice regardless of install state so the user can select
+    // a not-yet-downloaded model and trigger the download next.
+    {
+        let mut settings = state.settings.lock();
+        settings.active_model = manifest.name.clone();
+        save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    }
+
+    if path.exists() && verify_file(&manifest, &path).is_ok() {
+        // Model is on disk and valid — reload the transcriber immediately
+        // so the next dictation uses the newly selected weights.
+        reload_transcriber(&app, &path);
+    } else {
+        // Not installed. Swap to Placeholder so the next dictation surfaces
+        // a clear "model not installed" error rather than silently falling
+        // back to whatever was previously loaded.
+        let _ = state
+            .worker_tx
+            .try_send(WorkerCmd::SwapTranscriber(ActiveTranscriber::Placeholder));
+        let _ = app.emit(
+            "promptloom:notice",
+            format!("selected {name}: not installed yet — click Download to fetch it"),
+        );
+    }
+
+    Ok(state.settings.lock().clone())
 }
 
 #[derive(Serialize, Clone)]
@@ -569,7 +646,8 @@ fn remove_model_cmd(
 
 #[tauri::command]
 fn download_model_cmd(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let manifest = load_manifest(&state.manifest_path).map_err(|e| e.to_string())?;
+    let active = state.settings.lock().active_model.clone();
+    let manifest = find_model(&state.manifest_path, &active).map_err(|e| e.to_string())?;
     let dest = state.model_dir.join(format!("{}.bin", manifest.name));
     std::fs::create_dir_all(&state.model_dir).map_err(|e| e.to_string())?;
 
@@ -968,12 +1046,21 @@ fn resolve_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
     (model_dir, manifest_path)
 }
 
-fn resolve_model_path(model_dir: &std::path::Path, manifest_path: &std::path::Path) -> Option<PathBuf> {
+fn resolve_model_path(
+    model_dir: &std::path::Path,
+    manifest_path: &std::path::Path,
+    active_name: &str,
+) -> Option<PathBuf> {
     if let Ok(env_path) = std::env::var("PROMPTLOOM_MODEL_PATH") {
         let p = PathBuf::from(env_path);
         if p.exists() {
             return Some(p);
         }
+    }
+    // Prefer the user's selected model; fall back to the manifest default.
+    let path = model_dir.join(format!("{active_name}.bin"));
+    if path.exists() {
+        return Some(path);
     }
     load_manifest(manifest_path)
         .ok()
@@ -1029,6 +1116,8 @@ fn main() {
             needs_onboarding,
             verify_model_cmd,
             remove_model_cmd,
+            list_models,
+            set_active_model,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -1039,7 +1128,7 @@ fn main() {
                 .join("settings.json");
             let mut settings = load_settings(&settings_path);
 
-            let model_path = resolve_model_path(&model_dir, &manifest_path);
+            let model_path = resolve_model_path(&model_dir, &manifest_path, &settings.active_model);
 
             let vocab = settings
                 .project_path

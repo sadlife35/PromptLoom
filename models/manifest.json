@@ -7,7 +7,16 @@
       "version": "whisper.cpp ggml base.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 147951465,
-      "note": "SHA-256 is pinned to the upstream Hugging Face artifact. If the upstream file is republished, update this hash and bump the version string. Compute locally with: Get-FileHash ggml-base.en.bin -Algorithm SHA256."
+      "note": "Balanced default. ~1s inference on an average CPU."
+    },
+    {
+      "name": "ggml-tiny.en",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+      "sha256": "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+      "version": "whisper.cpp ggml tiny.en",
+      "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
+      "size_bytes": 77691713,
+      "note": "Faster alternative (~2x). Noticeably worse WER but acceptable for short-form dictation. If upstream republishes, recompute the SHA locally with Get-FileHash."
     }
   ]
 }

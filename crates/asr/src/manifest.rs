@@ -34,17 +34,32 @@ pub enum ManifestError {
 }
 
 pub fn load_manifest(path: &Path) -> Result<ModelManifest, ManifestError> {
+    // Kept for backward compatibility: returns the first model entry so
+    // existing single-model callers behave unchanged.
+    load_all_manifest(path)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ManifestError::Invalid("manifest has no models".into()))
+}
+
+/// Return every model declared in the manifest. Order is preserved so the
+/// first entry is treated as the default by the UI.
+pub fn load_all_manifest(path: &Path) -> Result<Vec<ModelManifest>, ManifestError> {
     let bytes = std::fs::read(path).map_err(|_| ManifestError::NotFound)?;
-    // Accept either {models: [...]} or a bare ModelManifest.
     if let Ok(file) = serde_json::from_slice::<ManifestFile>(&bytes) {
-        return file
-            .models
-            .into_iter()
-            .next()
-            .ok_or_else(|| ManifestError::Invalid("manifest has no models".into()));
+        return Ok(file.models);
     }
     serde_json::from_slice::<ModelManifest>(&bytes)
+        .map(|m| vec![m])
         .map_err(|e| ManifestError::Invalid(e.to_string()))
+}
+
+/// Look up a single model by its canonical `name`.
+pub fn find_model(path: &Path, name: &str) -> Result<ModelManifest, ManifestError> {
+    load_all_manifest(path)?
+        .into_iter()
+        .find(|m| m.name == name)
+        .ok_or_else(|| ManifestError::NoSuchModel(name.to_string()))
 }
 
 /// Verify `actual` SHA-256 hex string matches the manifest's.

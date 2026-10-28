@@ -24,6 +24,16 @@ type Settings = {
   hotkey: string;
   mic_device: string | null;
   dictation_mode: "hold" | "toggle";
+  active_model: string;
+};
+
+type ModelSummary = {
+  name: string;
+  size_bytes: number;
+  note: string | null;
+  installed: boolean;
+  verified: boolean;
+  is_active: boolean;
 };
 
 type PrivacyReport = {
@@ -74,11 +84,15 @@ export function App() {
   const [verifyResult, setVerifyResult] = useState<VerifyReport | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState(false);
   const [removeInFlight, setRemoveInFlight] = useState(false);
+  const [availableModels, setAvailableModels] = useState<ModelSummary[]>([]);
 
   const refreshModel = () => {
     invoke<ModelStatus>("model_status")
       .then(setModel)
       .catch((e) => setNotices((n) => [`model_status error: ${e}`, ...n]));
+    invoke<ModelSummary[]>("list_models")
+      .then(setAvailableModels)
+      .catch(() => void 0);
   };
 
   const refreshSettings = () => {
@@ -183,6 +197,48 @@ export function App() {
 
       <section style={{ marginTop: 16 }}>
         <h2 style={{ fontSize: 16 }}>Models</h2>
+        {availableModels.length > 1 && (
+          <div
+            style={{
+              background: "#f8f8fa",
+              border: "1px solid #e4e4e8",
+              padding: 12,
+              borderRadius: 6,
+              marginBottom: 10,
+            }}
+          >
+            <div style={{ fontSize: 13, marginBottom: 8 }}>
+              Speech model (used for all dictations):
+            </div>
+            <select
+              value={settings?.active_model ?? ""}
+              onChange={async (e) => {
+                try {
+                  const next = await invoke<Settings>("set_active_model", {
+                    name: e.target.value,
+                  });
+                  setSettings(next);
+                  refreshModel();
+                } catch (err) {
+                  setNotices((n) => [`set_active_model error: ${err}`, ...n]);
+                }
+              }}
+              style={{ padding: 6, minWidth: 320 }}
+            >
+              {availableModels.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name} — {(m.size_bytes / 1_000_000).toFixed(0)} MB
+                  {m.installed ? " · installed" : " · not installed"}
+                </option>
+              ))}
+            </select>
+            {availableModels.find((m) => m.is_active)?.note && (
+              <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+                {availableModels.find((m) => m.is_active)?.note}
+              </div>
+            )}
+          </div>
+        )}
         {model ? (
           <div
             style={{
@@ -195,7 +251,7 @@ export function App() {
             <div>
               <b>{model.name}</b>{" "}
               <span style={{ color: "#888" }}>
-                ({(model.size_bytes / 1_000_000).toFixed(1)} MB · recommended)
+                ({(model.size_bytes / 1_000_000).toFixed(1)} MB · active)
               </span>
             </div>
             <div style={{ fontSize: 12, color: "#666", wordBreak: "break-all" }}>
