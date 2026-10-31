@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0.0" --locked
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Icon placeholder
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          # Icons are gitignored (generated artifacts). CI uses a placeholder
+          # until a real logo is supplied via the ICON_SOURCE secret.
+          if (-not (Test-Path "src-tauri/icons/icon.ico")) {
+            Write-Host "No icons present; generating placeholder from embedded 1024x1024 PNG"
+            # Produce a solid-color 1024x1024 PNG inline (no external download)
+            [System.IO.File]::WriteAllBytes(
+              "$env:TEMP\placeholder.png",
+              [Convert]::FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+            )
+            cargo tauri icon "$env:TEMP\placeholder.png"
+          }
+
+      - name: Workspace tests
+        run: |
+          cargo test --workspace --all-targets
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build installer
+        working-directory: apps/desktop
+        run: cargo tauri build
+
+      - name: Locate installer and compute SHA-256
+        id: installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "No installer produced"
+            exit 1
+          }
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "installer=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Installer : $($exe.FullName)"
+          Write-Host "SHA-256   : $hash"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: ${{ steps.installer.outputs.installer }}
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.installer.outputs.installer }}
+          body: |
+            ## PromptLoom ${{ github.ref_name }}
+
+            Installer: `${{ steps.installer.outputs.installer }}`
+            SHA-256 : `${{ steps.installer.outputs.sha256 }}`
+
+            Verify after download:
+
+            ```powershell
+            Get-FileHash .\<installer>.exe -Algorithm SHA256
+            ```
+
+            Must match the SHA-256 above exactly.
+
+            See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) for what's in this release.
+
+            Windows SmartScreen will warn — the alpha installer is not
+            code-signed. Click "More info" → "Run anyway".
+          draft: true
+          prerelease: true

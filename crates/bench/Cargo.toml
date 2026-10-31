@@ -1,0 +1,19 @@
+[package]
+name = "promptloom-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+promptloom-core = { workspace = true }
+promptloom-asr = { workspace = true }
+promptloom-vocabulary = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+anyhow = "1"
+
+[[bin]]
+name = "promptloom-bench"
+path = "src/main.rs"

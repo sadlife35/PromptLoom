@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest a new feature for PromptLoom.
+title: "[Feature] "
+labels: ["feature", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Before writing a full proposal, a quick
+        sanity check:
+
+        **PromptLoom will not add:**
+        - Cloud ASR, telemetry, analytics, or any auto-sent data
+        - Accounts, sign-in, or sync
+        - Platforms other than Windows (macOS / Linux / mobile) — until the
+          Windows experience is polished
+        - LLM features that require a specific vendor's cloud key
+        - A plugin marketplace or extension store
+
+        If your idea needs any of the above, this probably isn't the right
+        home for it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: |
+        Tell us about the real-world use case, not the implementation. "I
+        want to dictate code comments without them getting auto-capitalized"
+        is good; "add a flag for lowercase mode" is less good.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: |
+        Rough sketch is fine. If it's a UI change, describe what the user
+        would see. If it's a config change, describe what they'd set.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What would you do today without this feature? Why isn't the
+        workaround good enough?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-filing checks
+      options:
+        - label: I searched existing issues and discussions
+          required: true
+        - label: This doesn't require sending anything to a cloud server
+          required: true
+        - label: This is a feature, not a bug (file a Bug report for broken behavior)
+          required: true

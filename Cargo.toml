@@ -7,6 +7,9 @@ members = [
     "crates/output-windows",
     "crates/vocabulary",
     "crates/test-support",
+    "crates/bench",
+    "crates/commands",
+    "crates/llm-polish",
 ]
 # apps/desktop/src-tauri is intentionally excluded from the default workspace
 # in M0. It requires Tauri v2 CLI prerequisites (Rust, Node, WebView2) and is
@@ -35,3 +38,5 @@ promptloom-asr = { path = "crates/asr" }
 promptloom-output-windows = { path = "crates/output-windows" }
 promptloom-vocabulary = { path = "crates/vocabulary" }
 promptloom-test-support = { path = "crates/test-support" }
+promptloom-commands = { path = "crates/commands" }
+promptloom-llm-polish = { path = "crates/llm-polish" }

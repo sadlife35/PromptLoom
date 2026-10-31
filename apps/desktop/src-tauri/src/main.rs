@@ -17,6 +17,8 @@ use promptloom_core::{
     state::ErrorKind, AudioBuffer, DeliveryOutcome, Notice, Orchestrator, OutputSink,
     PromptLoomError, State, TargetWindow, Transcriber,
 };
+use promptloom_commands::{apply as apply_commands, TranscriptMode};
+use promptloom_llm_polish::{OllamaClient, OllamaError, OllamaModel};
 use promptloom_core::TextTransformer;
 use promptloom_output_windows::WindowsClipboardSink;
 use promptloom_vocabulary::{Capitalizer, Polisher, Vocabulary};
@@ -61,21 +63,74 @@ impl OutputSink for ClipboardAndHudSink {
     }
 }
 
-/// Composite text transformer: whisper → polish → capitalize → vocabulary.
-/// One transformer stays in the orchestrator so the state machine is
-/// unchanged. Order matters: vocabulary wins over automatic capitalization
-/// so a user's project terms always have the final word.
+/// Runtime LLM-polish config. Lives in a shared `Arc<Mutex>` between
+/// AppState and `PolishedVocabulary`.
+#[derive(Debug, Clone, Default)]
+struct LlmConfig {
+    enabled: bool,
+    model: Option<String>,
+}
+
+/// Composite text transformer. Pipeline (order matters):
+///   whisper
+///   → **commands** (replace "comma" with ",", etc.)
+///   → **polish** (strip fillers, collapse repeats, normalize whitespace)
+///   → **capitalize** (only in Normal mode)
+///   → **vocabulary** (user's project terms always win)
+///
+/// `TranscriptMode` gates which stages apply. Code/Terminal modes skip
+/// sentence punctuation commands and skip capitalization entirely so you
+/// can dictate verbatim code without silent damage.
 struct PolishedVocabulary {
+    mode: Arc<Mutex<TranscriptMode>>,
     polisher: Polisher,
     capitalizer: Capitalizer,
     vocab: Vocabulary,
+    llm_config: Arc<Mutex<LlmConfig>>,
+    ollama: OllamaClient,
+    app: AppHandle,
 }
 
 impl TextTransformer for PolishedVocabulary {
     fn transform(&self, text: &str) -> String {
-        let polished = self.polisher.polish(text);
-        let capitalized = self.capitalizer.capitalize(&polished);
-        self.vocab.apply(&capitalized)
+        let mode = *self.mode.lock();
+        let after_commands = apply_commands(text, mode);
+        let polished = self.polisher.polish(&after_commands);
+        let after_caps = if mode.capitalize_sentences() {
+            self.capitalizer.capitalize(&polished)
+        } else {
+            polished
+        };
+        let after_vocab = self.vocab.apply(&after_caps);
+
+        // Optional Ollama cleanup. Hard timeout + raw fallback.
+        let (enabled, model) = {
+            let c = self.llm_config.lock();
+            (c.enabled, c.model.clone())
+        };
+        if enabled {
+            if let Some(model) = model {
+                match self.ollama.clean(&model, &after_vocab) {
+                    Ok(cleaned) if !cleaned.trim().is_empty() => return cleaned,
+                    Ok(_) => {
+                        tracing::warn!("ollama returned empty text; using raw");
+                    }
+                    Err(OllamaError::Timeout { ms }) => {
+                        tracing::warn!(ms, "ollama timed out; using raw");
+                        let _ = self
+                            .app
+                            .emit("promptloom:notice", "LLM polish timed out; used raw");
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "ollama polish failed; using raw");
+                        let _ = self
+                            .app
+                            .emit("promptloom:notice", "LLM polish unavailable; used raw");
+                    }
+                }
+            }
+        }
+        after_vocab
     }
 }
 
@@ -100,6 +155,13 @@ struct AppState {
     /// Last observed State. Updated by the worker after every event so UI
     /// commands can answer "are we Idle?" without acquiring the orch lock.
     state_snapshot: Arc<Mutex<State>>,
+    /// Current transcript mode. Shared with `PolishedVocabulary` so a
+    /// mode change takes effect on the next dictation without touching
+    /// the worker.
+    transcript_mode: Arc<Mutex<TranscriptMode>>,
+    /// Shared Ollama config: whether polish is enabled + which model to use.
+    /// Changes take effect on the next dictation.
+    llm_config: Arc<Mutex<LlmConfig>>,
     level: LevelMeter,
     model_dir: PathBuf,
     manifest_path: PathBuf,
@@ -126,6 +188,26 @@ struct Settings {
     dictation_mode: String,
     #[serde(default = "default_active_model")]
     active_model: String,
+    #[serde(default = "default_transcript_mode")]
+    transcript_mode: String,
+    #[serde(default)]
+    ollama_enabled: bool,
+    #[serde(default)]
+    ollama_model: Option<String>,
+}
+
+fn default_transcript_mode() -> String {
+    "normal".to_string()
+}
+
+const ALLOWED_TRANSCRIPT_MODES: &[&str] = &["normal", "code", "terminal"];
+
+fn parse_transcript_mode(s: &str) -> TranscriptMode {
+    match s {
+        "code" => TranscriptMode::Code,
+        "terminal" => TranscriptMode::Terminal,
+        _ => TranscriptMode::Normal,
+    }
 }
 
 fn default_active_model() -> String {
@@ -309,6 +391,81 @@ fn set_hotkey(
 
     let mut settings = state.settings.lock();
     settings.hotkey = hotkey;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[derive(Serialize, Clone)]
+struct OllamaStatus {
+    reachable: bool,
+    endpoint: String,
+    models: Vec<OllamaModel>,
+    enabled: bool,
+    selected_model: Option<String>,
+}
+
+#[tauri::command]
+fn check_ollama(state: tauri::State<'_, AppState>) -> OllamaStatus {
+    let client = OllamaClient::default();
+    let models = client.list_models().unwrap_or_default();
+    let (enabled, selected_model) = {
+        let c = state.llm_config.lock();
+        (c.enabled, c.model.clone())
+    };
+    OllamaStatus {
+        reachable: !models.is_empty(),
+        endpoint: client.endpoint,
+        models,
+        enabled,
+        selected_model,
+    }
+}
+
+#[tauri::command]
+fn set_ollama_enabled(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<Settings, String> {
+    {
+        let mut c = state.llm_config.lock();
+        c.enabled = enabled;
+    }
+    let mut settings = state.settings.lock();
+    settings.ollama_enabled = enabled;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn set_ollama_model(
+    state: tauri::State<'_, AppState>,
+    model: Option<String>,
+) -> Result<Settings, String> {
+    let normalized = model.filter(|s| !s.trim().is_empty());
+    {
+        let mut c = state.llm_config.lock();
+        c.model = normalized.clone();
+    }
+    let mut settings = state.settings.lock();
+    settings.ollama_model = normalized;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn set_transcript_mode(
+    state: tauri::State<'_, AppState>,
+    mode: String,
+) -> Result<Settings, String> {
+    if !ALLOWED_TRANSCRIPT_MODES.contains(&mode.as_str()) {
+        return Err(format!(
+            "mode {mode:?} not in allowed set {:?}",
+            ALLOWED_TRANSCRIPT_MODES
+        ));
+    }
+    *state.transcript_mode.lock() = parse_transcript_mode(&mode);
+    let mut settings = state.settings.lock();
+    settings.transcript_mode = mode;
     save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
     Ok(settings.clone())
 }
@@ -855,6 +1012,8 @@ fn init_orchestrator(
     model_path: Option<&std::path::Path>,
     vocab: Vocabulary,
     mic_device: Option<&str>,
+    mode: Arc<Mutex<TranscriptMode>>,
+    llm_config: Arc<Mutex<LlmConfig>>,
 ) -> Result<(Orch, LevelMeter), PromptLoomError> {
     let audio = WasapiAudioSource::new_with_device(mic_device)?;
     let level = audio.level_meter();
@@ -879,9 +1038,13 @@ fn init_orchestrator(
         app: app.clone(),
     };
     let text_transformer = PolishedVocabulary {
+        mode,
         polisher: Polisher::default(),
         capitalizer: Capitalizer::default(),
         vocab,
+        llm_config,
+        ollama: OllamaClient::default(),
+        app: app.clone(),
     };
     let orch = Orchestrator::new(audio, transcriber, text_transformer, sink);
     Ok((orch, level))
@@ -1118,6 +1281,10 @@ fn main() {
             remove_model_cmd,
             list_models,
             set_active_model,
+            set_transcript_mode,
+            check_ollama,
+            set_ollama_enabled,
+            set_ollama_model,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -1138,11 +1305,20 @@ fn main() {
             settings.terms_count = vocab.len();
 
             let mic_device = settings.mic_device.clone();
+            let transcript_mode = Arc::new(Mutex::new(parse_transcript_mode(
+                &settings.transcript_mode,
+            )));
+            let llm_config = Arc::new(Mutex::new(LlmConfig {
+                enabled: settings.ollama_enabled,
+                model: settings.ollama_model.clone(),
+            }));
             let (orch_opt, level) = match init_orchestrator(
                 app.handle(),
                 model_path.as_deref(),
                 vocab,
                 mic_device.as_deref(),
+                transcript_mode.clone(),
+                llm_config.clone(),
             ) {
                 Ok(ol) => (Some(ol.0), Some(ol.1)),
                 Err(e) => {
@@ -1174,6 +1350,8 @@ fn main() {
             app.manage(AppState {
                 worker_tx,
                 state_snapshot,
+                transcript_mode,
+                llm_config,
                 level: level.clone(),
                 model_dir,
                 manifest_path,

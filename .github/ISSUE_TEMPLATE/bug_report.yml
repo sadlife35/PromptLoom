@@ -1,0 +1,64 @@
+name: Bug report
+description: Something is broken in PromptLoom.
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! A few things make bugs much easier to fix:
+        - A clear "what I did" / "what happened" / "what I expected"
+        - PromptLoom version (Settings → About, or `promptloom-desktop --version`)
+        - Windows version
+        - Whether you can reproduce it on a clean install
+  - type: input
+    id: version
+    attributes:
+      label: PromptLoom version
+      description: Found under Settings → About, or run `promptloom-desktop --version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Settings → System → About (e.g. "Windows 11 Home 24H2").
+      placeholder: "Windows 11 Home 24H2"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did PromptLoom do, what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal reproduction. "I did X then Y then saw Z."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        If relevant, paste the last ~50 lines from the PromptLoom log window
+        (visible when you run `cargo tauri dev`). **Please remove any
+        transcript content before pasting.** Also run the privacy audit
+        (Settings → Privacy audit → Run) and paste its result.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-filing checks
+      options:
+        - label: I searched existing issues
+          required: true
+        - label: I've confirmed this isn't user error (e.g. model not installed, hotkey conflict)
+          required: true
+        - label: I've removed any personal transcripts, audio, or clipboard content from the logs above
+          required: true

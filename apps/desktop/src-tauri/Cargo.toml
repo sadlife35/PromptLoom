@@ -21,6 +21,8 @@ promptloom-audio = { path = "../../../crates/audio" }
 promptloom-asr = { path = "../../../crates/asr" }
 promptloom-output-windows = { path = "../../../crates/output-windows" }
 promptloom-vocabulary = { path = "../../../crates/vocabulary" }
+promptloom-commands = { path = "../../../crates/commands" }
+promptloom-llm-polish = { path = "../../../crates/llm-polish" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
