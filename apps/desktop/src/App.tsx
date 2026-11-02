@@ -29,7 +29,15 @@ type Settings = {
   transcript_mode: "normal" | "code" | "terminal";
   ollama_enabled: boolean;
   ollama_model: string | null;
+  auto_context: boolean;
+  bundled_polish_enabled: boolean;
+  bundled_polish_model: string | null;
 };
+
+type LlamaHealth =
+  | { kind: "active"; port: number }
+  | { kind: "fallback" }
+  | { kind: "disabled" };
 
 type OllamaStatus = {
   reachable: boolean;
@@ -52,6 +60,7 @@ type PrivacyReport = {
   scratch_dir: string;
   residual_wavs: string[];
   residual_logs: string[];
+  in_memory_streaming?: boolean;
 };
 
 type Phase = {
@@ -863,6 +872,42 @@ function SettingsPage(p: SettingsPageProps) {
       <section className="pl-section">
         <div className="pl-section-label">Transcript mode</div>
         <div className="pl-card">
+          <label
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+              cursor: "pointer",
+              marginBottom: 14,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={settings?.auto_context ?? true}
+              onChange={async (e) => {
+                try {
+                  const next = await invoke<Settings>("set_auto_context", {
+                    enabled: e.target.checked,
+                  });
+                  setSettings(next);
+                } catch (err) {
+                  setNotices((n) => [`set_auto_context error: ${err}`, ...n]);
+                }
+              }}
+            />
+            <div>
+              <div style={{ fontWeight: 600 }}>
+                Auto-detect from active app
+              </div>
+              <div className="pl-card-body" style={{ marginTop: 2 }}>
+                When on, PromptLoom picks Code or Terminal mode when it
+                recognizes editors (VS Code, Cursor, JetBrains…) or shells
+                (Windows Terminal, PowerShell, WezTerm…). For unknown apps,
+                falls back to your manual pick below.
+              </div>
+            </div>
+          </label>
+
           <div className="pl-btn-group" style={{ marginBottom: 10 }}>
             {(["normal", "code", "terminal"] as const).map((m) => (
               <button
@@ -914,9 +959,65 @@ function SettingsPage(p: SettingsPageProps) {
         </div>
       </section>
 
-      {/* LLM polish */}
+      {/* Bundled polish (primary) */}
       <section className="pl-section">
-        <div className="pl-section-label">LLM polish (optional)</div>
+        <div className="pl-section-label">Transcript polish</div>
+        <div className="pl-card">
+          <div className="pl-card-body" style={{ marginBottom: 12 }}>
+            After the normal pipeline runs, PromptLoom cleans the transcript
+            with a <strong style={{ color: "var(--fg)" }}>local LLM</strong>{" "}
+            bundled with the app. Fillers get stripped, awkward phrasing
+            gets smoothed, and your meaning stays intact. Hard 2-second
+            timeout — if the model is slow, you get the raw transcript. All
+            inference stays on your PC.
+          </div>
+
+          <label
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={settings?.bundled_polish_enabled ?? true}
+              onChange={async (e) => {
+                try {
+                  const next = await invoke<Settings>(
+                    "set_bundled_polish_enabled",
+                    { enabled: e.target.checked }
+                  );
+                  setSettings(next);
+                } catch (err) {
+                  setNotices((n) => [
+                    `set_bundled_polish_enabled error: ${err}`,
+                    ...n,
+                  ]);
+                }
+              }}
+            />
+            <span style={{ fontSize: 13 }}>
+              Clean transcripts with the local polish model
+            </span>
+          </label>
+
+          <div className="pl-notice" style={{ marginTop: 12 }}>
+            To install the model, drop a GGUF file into{" "}
+            <code className="pl-inline">models/polish/</code> (or{" "}
+            <code className="pl-inline">tools/</code>) and{" "}
+            <code className="pl-inline">llama-server.exe</code> next to it.
+            Recommended: Qwen2.5-1.5B Q4_K_M (~1.1 GB). SHA-256 verification
+            via <code className="pl-inline">polish-manifest.json</code>.
+            In-app downloader is on the roadmap.
+          </div>
+        </div>
+      </section>
+
+      {/* Advanced: Ollama fallthrough */}
+      <section className="pl-section">
+        <div className="pl-section-label">Advanced · Custom LLM via Ollama</div>
         <div className="pl-card">
           <div className="pl-card-body" style={{ marginBottom: 12 }}>
             After the normal pipeline runs, PromptLoom can send the transcript
@@ -1160,7 +1261,7 @@ function SettingsPage(p: SettingsPageProps) {
               privacy.residual_logs.length === 0 ? (
                 <div className="pl-pill ok" style={{ marginTop: 8 }}>
                   <span className="dot" />
-                  0 wav · 0 log · clean
+                  0 wav · 0 log · in-memory streaming (0 disk writes) · clean
                 </div>
               ) : (
                 <div className="pl-pill err" style={{ marginTop: 8 }}>

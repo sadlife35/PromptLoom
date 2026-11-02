@@ -52,6 +52,11 @@ where
         self.session.state()
     }
 
+    /// Snapshot the audio recorded so far during active capture.
+    pub fn audio_snapshot(&self) -> Option<AudioBuffer> {
+        self.audio.snapshot()
+    }
+
     /// Drain user-visible notices produced since the last call.
     pub fn take_notices(&mut self) -> Vec<Notice> {
         std::mem::take(&mut self.notices)

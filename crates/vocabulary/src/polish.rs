@@ -95,9 +95,7 @@ fn collapse_repeats(text: &str) -> String {
             // Keep just the first occurrence (preserves original casing).
             out.push(tokens[i]);
         } else {
-            for k in i..j {
-                out.push(tokens[k]);
-            }
+            out.extend_from_slice(&tokens[i..j]);
         }
         i = j;
     }
@@ -237,8 +235,7 @@ fn capitalize_standalone_i(text: &str) -> String {
 fn capitalize_sentence_starts(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut capitalize_next = true;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    for c in text.chars() {
         if capitalize_next && c.is_alphabetic() {
             for upper in c.to_uppercase() {
                 out.push(upper);
@@ -360,7 +357,7 @@ mod tests {
             fillers: vec![
                 "um".into(),
                 "like".into(),
-                "you".into(),  // intentional: "you know" would need bigram handling
+                "you".into(), // intentional: "you know" would need bigram handling
             ],
             ..Polisher::default()
         };
@@ -465,7 +462,10 @@ mod tests {
     #[test]
     fn noop_capitalizer_is_identity() {
         let c = Capitalizer::noop();
-        assert_eq!(c.capitalize("hello. i am mr. smith"), "hello. i am mr. smith");
+        assert_eq!(
+            c.capitalize("hello. i am mr. smith"),
+            "hello. i am mr. smith"
+        );
     }
 
     #[test]

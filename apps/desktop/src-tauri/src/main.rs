@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod context;
 mod foreground;
 
 use std::path::PathBuf;
@@ -18,7 +19,9 @@ use promptloom_core::{
     PromptLoomError, State, TargetWindow, Transcriber,
 };
 use promptloom_commands::{apply as apply_commands, TranscriptMode};
-use promptloom_llm_polish::{OllamaClient, OllamaError, OllamaModel};
+use promptloom_llm_polish::{
+    resolve_llama_binary, LlamaHealth, LlamaServer, OllamaClient, OllamaError, OllamaModel,
+};
 use promptloom_core::TextTransformer;
 use promptloom_output_windows::WindowsClipboardSink;
 use promptloom_vocabulary::{Capitalizer, Polisher, Vocabulary};
@@ -32,6 +35,26 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutSt
 enum ActiveTranscriber {
     Whisper(WhisperTranscriber),
     Placeholder,
+}
+
+impl ActiveTranscriber {
+    pub fn transcribe_partial(
+        &mut self,
+        audio: &AudioBuffer,
+        prompt: Option<&str>,
+    ) -> Result<Option<String>, PromptLoomError> {
+        match self {
+            Self::Whisper(w) => w.transcribe_partial(audio, prompt),
+            Self::Placeholder => Ok(None),
+        }
+    }
+
+    pub fn server_health(&mut self) -> promptloom_asr::ServerHealth {
+        match self {
+            Self::Whisper(w) => w.server_health(),
+            Self::Placeholder => promptloom_asr::ServerHealth::Disabled,
+        }
+    }
 }
 
 impl Transcriber for ActiveTranscriber {
@@ -65,10 +88,28 @@ impl OutputSink for ClipboardAndHudSink {
 
 /// Runtime LLM-polish config. Lives in a shared `Arc<Mutex>` between
 /// AppState and `PolishedVocabulary`.
-#[derive(Debug, Clone, Default)]
+///
+/// Two layers:
+///   - `bundled_enabled` — the on-by-default local polish pass (via the
+///     managed `llama-server` sidecar + a bundled polish model).
+///   - `enabled` + `model` — the optional "Advanced" fallthrough to the
+///     user's own Ollama server. Only kicks in if the bundled layer
+///     wasn't attempted or produced empty output.
+#[derive(Debug, Clone)]
 struct LlmConfig {
+    bundled_enabled: bool,
     enabled: bool,
     model: Option<String>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            bundled_enabled: true,
+            enabled: false,
+            model: None,
+        }
+    }
 }
 
 /// Composite text transformer. Pipeline (order matters):
@@ -87,6 +128,11 @@ struct PolishedVocabulary {
     capitalizer: Capitalizer,
     vocab: Vocabulary,
     llm_config: Arc<Mutex<LlmConfig>>,
+    /// Managed llama.cpp sidecar for the bundled polish pass. `None` until
+    /// the server finishes warming up (startup is async, model load takes
+    /// 5–15 s on CPU). Dictations that arrive before warmup silently fall
+    /// through to the raw text.
+    bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
     ollama: OllamaClient,
     app: AppHandle,
 }
@@ -103,11 +149,31 @@ impl TextTransformer for PolishedVocabulary {
         };
         let after_vocab = self.vocab.apply(&after_caps);
 
-        // Optional Ollama cleanup. Hard timeout + raw fallback.
-        let (enabled, model) = {
+        let (bundled_enabled, enabled, model) = {
             let c = self.llm_config.lock();
-            (c.enabled, c.model.clone())
+            (c.bundled_enabled, c.enabled, c.model.clone())
         };
+
+        // Primary polish: the bundled local llama.cpp sidecar. On by
+        // default. Hard 2-second timeout. If the server isn't warm yet,
+        // isn't bundled, or the call fails, we fall through — never block.
+        if bundled_enabled {
+            let mut slot = self.bundled_llama.lock();
+            if let Some(server) = slot.as_mut() {
+                match server.polish(&after_vocab) {
+                    Ok(cleaned) if !cleaned.trim().is_empty() => return cleaned,
+                    Ok(_) => {
+                        tracing::debug!("bundled polish returned empty; falling through");
+                    }
+                    Err(e) => {
+                        tracing::debug!(?e, "bundled polish failed; falling through");
+                    }
+                }
+            }
+        }
+
+        // Advanced fallthrough: user's own Ollama server. Hard timeout +
+        // raw fallback. Only kicks in if explicitly enabled in Settings.
         if enabled {
             if let Some(model) = model {
                 match self.ollama.clean(&model, &after_vocab) {
@@ -162,6 +228,13 @@ struct AppState {
     /// Shared Ollama config: whether polish is enabled + which model to use.
     /// Changes take effect on the next dictation.
     llm_config: Arc<Mutex<LlmConfig>>,
+    /// Latest observed whisper-server health. Updated by the worker after
+    /// every transcription (partial or final) so UI queries never block
+    /// the worker.
+    whisper_health: Arc<Mutex<promptloom_asr::ServerHealth>>,
+    /// Managed `llama-server` sidecar for bundled transcript polish.
+    /// `None` until startup completes (first dictation may skip polish).
+    bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
     level: LevelMeter,
     model_dir: PathBuf,
     manifest_path: PathBuf,
@@ -194,6 +267,28 @@ struct Settings {
     ollama_enabled: bool,
     #[serde(default)]
     ollama_model: Option<String>,
+    /// When true, each dictation checks the foreground app and auto-picks
+    /// Code/Terminal mode for known editors/shells. Falls back to the
+    /// user's manual `transcript_mode` if the app is unknown.
+    #[serde(default = "default_auto_context")]
+    auto_context: bool,
+    /// When true, run the bundled local LLM polish pass before delivery.
+    /// Default: true. Falls through gracefully to raw text if the sidecar
+    /// isn't warm or the model isn't downloaded.
+    #[serde(default = "default_bundled_polish_enabled")]
+    bundled_polish_enabled: bool,
+    /// Which bundled polish model to load. `None` means "auto-pick the
+    /// first installed polish model from the manifest" at startup.
+    #[serde(default)]
+    bundled_polish_model: Option<String>,
+}
+
+fn default_auto_context() -> bool {
+    true
+}
+
+fn default_bundled_polish_enabled() -> bool {
+    true
 }
 
 fn default_transcript_mode() -> String {
@@ -211,7 +306,9 @@ fn parse_transcript_mode(s: &str) -> TranscriptMode {
 }
 
 fn default_active_model() -> String {
-    "ggml-base.en".to_string()
+    // New installs default to small.en (best quality-to-size trade for most
+    // users). Existing installs keep whatever is already in settings.json.
+    "ggml-small.en".to_string()
 }
 
 fn default_hotkey() -> String {
@@ -453,6 +550,17 @@ fn set_ollama_model(
 }
 
 #[tauri::command]
+fn set_auto_context(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.auto_context = enabled;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
 fn set_transcript_mode(
     state: tauri::State<'_, AppState>,
     mode: String,
@@ -558,6 +666,7 @@ struct PrivacyReport {
     scratch_dir: String,
     residual_wavs: Vec<String>,
     residual_logs: Vec<String>,
+    in_memory_streaming: bool,
 }
 
 #[tauri::command]
@@ -583,20 +692,49 @@ fn audit_privacy(state: tauri::State<'_, AppState>) -> PrivacyReport {
         scratch_dir: dir.to_string_lossy().into_owned(),
         residual_wavs: wavs,
         residual_logs: logs,
+        in_memory_streaming: true,
     }
 }
 
 fn resolve_engine_path(model_dir: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(env) = std::env::var("PROMPTLOOM_WHISPER_SERVER_BIN") {
+        let p = PathBuf::from(env);
+        if p.exists() {
+            return Some(p);
+        }
+    }
     if let Ok(env) = std::env::var("PROMPTLOOM_WHISPER_BIN") {
         let p = PathBuf::from(env);
         if p.exists() {
             return Some(p);
         }
     }
-    for name in &["whisper-cli.exe", "main.exe", "whisper-cli", "main"] {
+    for name in &[
+        "whisper-server.exe",
+        "whisper-cli.exe",
+        "main.exe",
+        "whisper-cli",
+        "main",
+    ] {
         let p = model_dir.join(name);
         if p.exists() {
             return Some(p);
+        }
+    }
+    // Check tools/
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut cur = cwd.as_path();
+        loop {
+            for name in &["whisper-server.exe", "whisper-cli.exe"] {
+                let candidate = cur.join("tools").join(name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => break,
+            }
         }
     }
     None
@@ -984,6 +1122,21 @@ fn schedule_hide_hud(app: AppHandle, delay: Duration) {
 
 fn show_hud(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("hud") {
+        // Reposition every show: user's monitor layout can change (laptop
+        // dock, external display plug/unplug) and we want center-bottom
+        // of the primary (currently focused) monitor each time.
+        if let Ok(Some(monitor)) = w.current_monitor() {
+            let size = w.outer_size().unwrap_or_else(|_| tauri::PhysicalSize {
+                width: 160,
+                height: 44,
+            });
+            let m = monitor.size();
+            let m_pos = monitor.position();
+            let bottom_margin: i32 = 48;
+            let x = m_pos.x + (m.width as i32 - size.width as i32) / 2;
+            let y = m_pos.y + m.height as i32 - size.height as i32 - bottom_margin;
+            let _ = w.set_position(tauri::PhysicalPosition { x, y });
+        }
         let _ = w.show();
     }
 }
@@ -992,6 +1145,131 @@ fn hide_hud(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("hud") {
         let _ = w.hide();
     }
+}
+
+/// Resolve the polish model file path. Looks under `<model_dir>/polish/`
+/// first, falls back to `tools/` so dev installs that drop the GGUF next
+/// to llama-server.exe just work.
+fn resolve_polish_model_path(
+    model_dir: &std::path::Path,
+    preferred_name: Option<&str>,
+) -> Option<PathBuf> {
+    let polish_dir = model_dir.join("polish");
+    let candidates: &[PathBuf] = &[polish_dir.clone()];
+
+    // Also try tools/ relative to cwd + ancestors (dev convenience).
+    let mut tool_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut cur = cwd.as_path();
+        loop {
+            tool_dirs.push(cur.join("tools"));
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+    }
+
+    let dirs: Vec<&std::path::Path> = candidates
+        .iter()
+        .map(|p| p.as_path())
+        .chain(tool_dirs.iter().map(|p| p.as_path()))
+        .collect();
+
+    // If user picked a model name, look for its specific filename first.
+    if let Some(name) = preferred_name {
+        for dir in &dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
+                        if fname.to_lowercase().contains(&name.to_lowercase())
+                            && fname.ends_with(".gguf")
+                        {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Otherwise: pick the first .gguf we can find.
+    for dir in &dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Spawn `llama-server` on a background thread. Startup takes ~5–15 s on
+/// CPU (model load), so we never block the UI. When ready, inserts the
+/// server into the shared slot and emits a notice.
+fn start_llama_server_async(
+    app: AppHandle,
+    slot: Arc<Mutex<Option<LlamaServer>>>,
+    preferred_model: Option<String>,
+    model_dir: &std::path::Path,
+) {
+    let model_dir = model_dir.to_path_buf();
+    std::thread::Builder::new()
+        .name("promptloom-llama-startup".into())
+        .spawn(move || {
+            let Some(model_path) =
+                resolve_polish_model_path(&model_dir, preferred_model.as_deref())
+            else {
+                tracing::info!(
+                    "no polish model found; bundled polish disabled until one is installed"
+                );
+                let _ = app.emit(
+                    "promptloom:llama-health",
+                    &LlamaHealth::Disabled,
+                );
+                return;
+            };
+            let Some(binary) = resolve_llama_binary(&model_path) else {
+                tracing::info!("llama-server binary not found; bundled polish disabled");
+                let _ = app.emit(
+                    "promptloom:llama-health",
+                    &LlamaHealth::Disabled,
+                );
+                return;
+            };
+            match LlamaServer::start(&binary, &model_path) {
+                Ok(server) => {
+                    tracing::info!(
+                        port = server.port(),
+                        model = %model_path.display(),
+                        "llama-server ready for bundled polish"
+                    );
+                    let port = server.port();
+                    *slot.lock() = Some(server);
+                    let _ = app.emit(
+                        "promptloom:llama-health",
+                        &LlamaHealth::Active { port },
+                    );
+                    let _ = app.emit(
+                        "promptloom:notice",
+                        "Local polish ready. Transcripts will be cleaned automatically.",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "llama-server failed to start; polish falls through");
+                    let _ = app.emit(
+                        "promptloom:llama-health",
+                        &LlamaHealth::Fallback,
+                    );
+                }
+            }
+        })
+        .expect("spawn llama-startup thread");
 }
 
 fn start_level_pump(app: AppHandle, level: LevelMeter) {
@@ -1014,6 +1292,7 @@ fn init_orchestrator(
     mic_device: Option<&str>,
     mode: Arc<Mutex<TranscriptMode>>,
     llm_config: Arc<Mutex<LlmConfig>>,
+    bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
 ) -> Result<(Orch, LevelMeter), PromptLoomError> {
     let audio = WasapiAudioSource::new_with_device(mic_device)?;
     let level = audio.level_meter();
@@ -1043,6 +1322,7 @@ fn init_orchestrator(
         capitalizer: Capitalizer::default(),
         vocab,
         llm_config,
+        bundled_llama,
         ollama: OllamaClient::default(),
         app: app.clone(),
     };
@@ -1107,6 +1387,44 @@ fn on_escape(app: &AppHandle) {
     }
 }
 
+#[tauri::command]
+fn cancel_dictation(app: AppHandle) {
+    on_escape(&app);
+}
+
+#[tauri::command]
+fn whisper_server_status(
+    state: tauri::State<'_, AppState>,
+) -> promptloom_asr::ServerHealth {
+    state.whisper_health.lock().clone()
+}
+
+#[tauri::command]
+fn polish_server_status(state: tauri::State<'_, AppState>) -> LlamaHealth {
+    let mut slot = state.bundled_llama.lock();
+    if let Some(srv) = slot.as_mut() {
+        if srv.is_alive() {
+            LlamaHealth::Active { port: srv.port() }
+        } else {
+            LlamaHealth::Fallback
+        }
+    } else {
+        LlamaHealth::Disabled
+    }
+}
+
+#[tauri::command]
+fn set_bundled_polish_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.bundled_polish_enabled = enabled;
+    state.llm_config.lock().bundled_enabled = enabled;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
 /// The orchestrator worker. Owns `Orch` exclusively; receives commands via
 /// an mpsc channel. All blocking work (whisper subprocess, clipboard) runs
 /// here, off the Tauri command threads, so the UI stays responsive.
@@ -1115,50 +1433,199 @@ fn spawn_orchestrator_worker(
     rx: std::sync::mpsc::Receiver<WorkerCmd>,
     app: AppHandle,
     state_snapshot: Arc<Mutex<State>>,
+    whisper_health: Arc<Mutex<promptloom_asr::ServerHealth>>,
 ) {
     std::thread::Builder::new()
         .name("promptloom-orch".into())
         .spawn(move || {
-            while let Ok(cmd) = rx.recv() {
-                match cmd {
-                    WorkerCmd::HotkeyPressed(target) => orch.press(target),
-                    WorkerCmd::HotkeyReleased => {
-                        // Flash "Processing locally" before whisper blocks.
-                        let processing = Phase {
-                            kind: "processing",
-                            label: "Processing locally".into(),
-                            detail: "Transcribing on this PC.".into(),
-                        };
-                        update_tray_tooltip(&app, &processing);
-                        let _ = app.emit("promptloom:phase", processing);
-                        orch.release();
+            let mut last_partial: Option<String> = None;
+            let mut last_snapshot_time = std::time::Instant::now();
+            // Track the last health kind we observed so we can emit a
+            // transition notice when Active ↔ Fallback flips.
+            let mut last_health_kind: Option<&'static str> = None;
+
+            let update_health = |orch: &mut Orch,
+                                 health_slot: &Arc<Mutex<promptloom_asr::ServerHealth>>,
+                                 last: &mut Option<&'static str>,
+                                 app: &AppHandle| {
+                let (_, trans_slot, _, _) = orch.components();
+                let current = trans_slot.server_health();
+                let kind = match &current {
+                    promptloom_asr::ServerHealth::Active { .. } => "active",
+                    promptloom_asr::ServerHealth::Fallback { .. } => "fallback",
+                    promptloom_asr::ServerHealth::Disabled => "disabled",
+                };
+                let changed = match last {
+                    None => kind != "disabled", // first observation worth announcing
+                    Some(prev) => *prev != kind,
+                };
+                if changed {
+                    match &current {
+                        promptloom_asr::ServerHealth::Fallback {
+                            reason,
+                            retry_after_ms,
+                            ..
+                        } => {
+                            let secs = (retry_after_ms + 999) / 1000;
+                            let _ = app.emit(
+                                "promptloom:notice",
+                                format!(
+                                    "Streaming paused — using batch mode ({reason}). \
+                                     Retrying in {secs}s."
+                                ),
+                            );
+                        }
+                        promptloom_asr::ServerHealth::Active { .. } => {
+                            if last.is_some() {
+                                let _ = app.emit(
+                                    "promptloom:notice",
+                                    "Streaming restored.",
+                                );
+                            }
+                        }
+                        promptloom_asr::ServerHealth::Disabled => {}
                     }
-                    WorkerCmd::EscapePressed => orch.cancel(),
-                    WorkerCmd::ReloadVocabulary(v) => {
-                        let (_, _, text_slot, _) = orch.components();
-                        text_slot.vocab = v;
-                        tracing::info!("vocabulary swapped in by worker");
-                        continue; // No state change; skip emit path.
-                    }
-                    WorkerCmd::SwapTranscriber(t) => {
-                        let (_, trans_slot, _, _) = orch.components();
-                        *trans_slot = t;
-                        tracing::info!("transcriber swapped in by worker");
-                        continue;
-                    }
+                    *last = Some(kind);
                 }
+                let _ = app.emit("promptloom:whisper-health", &current);
+                *health_slot.lock() = current;
+            };
 
-                let notices = orch.take_notices();
-                let final_state = orch.state().clone();
-                *state_snapshot.lock() = final_state.clone();
+            loop {
+                // If recording, use a short recv timeout so we can run partial transcription every ~800ms
+                let is_recording = matches!(orch.state(), State::Recording { .. });
+                let cmd_opt = if is_recording {
+                    match rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(cmd) => Some(cmd),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                } else {
+                    match rx.recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(_) => break,
+                    }
+                };
 
-                drain_notices(&app, notices.clone());
-                emit_phase(&app, &final_state, &notices);
-                let _ = app.emit("promptloom:state", format!("{:?}", final_state));
+                if let Some(cmd) = cmd_opt {
+                    match cmd {
+                        WorkerCmd::HotkeyPressed(target) => {
+                            last_partial = None;
+                            last_snapshot_time = std::time::Instant::now();
 
-                if has_terminal_notice(&notices) {
-                    let dwell = terminal_dwell(&notices);
-                    schedule_hide_hud(app.clone(), dwell);
+                            // Context-aware mode: if auto_context is on and
+                            // we recognize the foreground app, override the
+                            // effective transcript mode for this dictation.
+                            // The user's persisted `transcript_mode` setting
+                            // is unchanged — this only affects the Arc that
+                            // PolishedVocabulary reads during polish.
+                            {
+                                let app_state = app.state::<AppState>();
+                                let (auto, user_mode_str) = {
+                                    let s = app_state.settings.lock();
+                                    (s.auto_context, s.transcript_mode.clone())
+                                };
+                                let user_mode = parse_transcript_mode(&user_mode_str);
+                                let detected = if auto {
+                                    context::infer_transcript_mode(&target.executable)
+                                } else {
+                                    None
+                                };
+                                let effective = detected.unwrap_or(user_mode);
+                                *app_state.transcript_mode.lock() = effective;
+
+                                if let Some(d) = detected {
+                                    if d != user_mode {
+                                        let label = match d {
+                                            TranscriptMode::Code => "Code",
+                                            TranscriptMode::Terminal => "Terminal",
+                                            TranscriptMode::Normal => "Normal",
+                                        };
+                                        let _ = app.emit(
+                                            "promptloom:notice",
+                                            format!(
+                                                "{label} mode (auto · {})",
+                                                target.executable
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+
+                            orch.press(target);
+                        }
+                        WorkerCmd::HotkeyReleased => {
+                            // Flash "Processing locally" before whisper blocks.
+                            let processing = Phase {
+                                kind: "processing",
+                                label: "Processing locally".into(),
+                                detail: "Transcribing on this PC.".into(),
+                            };
+                            update_tray_tooltip(&app, &processing);
+                            let _ = app.emit("promptloom:phase", processing);
+                            orch.release();
+                            last_partial = None;
+                        }
+                        WorkerCmd::EscapePressed => {
+                            orch.cancel();
+                            last_partial = None;
+                            let _ = app.emit("promptloom:partial", "");
+                        }
+                        WorkerCmd::ReloadVocabulary(v) => {
+                            let (_, _, text_slot, _) = orch.components();
+                            text_slot.vocab = v;
+                            tracing::info!("vocabulary swapped in by worker");
+                            continue; // No state change; skip emit path.
+                        }
+                        WorkerCmd::SwapTranscriber(t) => {
+                            let (_, trans_slot, _, _) = orch.components();
+                            *trans_slot = t;
+                            tracing::info!("transcriber swapped in by worker");
+                            continue;
+                        }
+                    }
+
+                    let notices = orch.take_notices();
+                    let final_state = orch.state().clone();
+                    *state_snapshot.lock() = final_state.clone();
+
+                    drain_notices(&app, notices.clone());
+                    emit_phase(&app, &final_state, &notices);
+                    let _ = app.emit("promptloom:state", format!("{:?}", final_state));
+
+                    // Refresh whisper-server health after every event (final
+                    // transcribe, cancel, etc.). Emits a transition notice if
+                    // the server just flipped Active ↔ Fallback.
+                    update_health(&mut orch, &whisper_health, &mut last_health_kind, &app);
+
+                    if has_terminal_notice(&notices) {
+                        let dwell = terminal_dwell(&notices);
+                        schedule_hide_hud(app.clone(), dwell);
+                    }
+                } else if is_recording {
+                    // Periodic partial snapshot while recording
+                    if last_snapshot_time.elapsed() >= Duration::from_millis(800) {
+                        if let Some(snapshot) = orch.audio_snapshot() {
+                            // Only run partial once audio duration exceeds 1.5s
+                            if snapshot.duration() >= Duration::from_millis(1500) {
+                                last_snapshot_time = std::time::Instant::now();
+                                let (_, trans_slot, _, _) = orch.components();
+                                match trans_slot.transcribe_partial(&snapshot, last_partial.as_deref()) {
+                                    Ok(Some(partial_text)) => {
+                                        let trimmed = partial_text.trim();
+                                        if !trimmed.is_empty() {
+                                            last_partial = Some(trimmed.to_string());
+                                            let _ = app.emit("promptloom:partial", trimmed);
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        tracing::debug!(?e, "partial inference error");
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -1285,6 +1752,11 @@ fn main() {
             check_ollama,
             set_ollama_enabled,
             set_ollama_model,
+            set_auto_context,
+            cancel_dictation,
+            whisper_server_status,
+            polish_server_status,
+            set_bundled_polish_enabled,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -1309,9 +1781,17 @@ fn main() {
                 &settings.transcript_mode,
             )));
             let llm_config = Arc::new(Mutex::new(LlmConfig {
+                bundled_enabled: settings.bundled_polish_enabled,
                 enabled: settings.ollama_enabled,
                 model: settings.ollama_model.clone(),
             }));
+            let bundled_llama: Arc<Mutex<Option<LlamaServer>>> = Arc::new(Mutex::new(None));
+            start_llama_server_async(
+                app.handle().clone(),
+                bundled_llama.clone(),
+                settings.bundled_polish_model.clone(),
+                &model_dir,
+            );
             let (orch_opt, level) = match init_orchestrator(
                 app.handle(),
                 model_path.as_deref(),
@@ -1319,6 +1799,7 @@ fn main() {
                 mic_device.as_deref(),
                 transcript_mode.clone(),
                 llm_config.clone(),
+                bundled_llama.clone(),
             ) {
                 Ok(ol) => (Some(ol.0), Some(ol.1)),
                 Err(e) => {
@@ -1338,12 +1819,14 @@ fn main() {
             // disconnect — safe degraded mode.
             let (worker_tx, worker_rx) = sync_channel::<WorkerCmd>(32);
             let state_snapshot = Arc::new(Mutex::new(State::Idle));
+            let whisper_health = Arc::new(Mutex::new(promptloom_asr::ServerHealth::Disabled));
             if let Some(orch) = orch_opt {
                 spawn_orchestrator_worker(
                     orch,
                     worker_rx,
                     app.handle().clone(),
                     state_snapshot.clone(),
+                    whisper_health.clone(),
                 );
             }
 
@@ -1352,6 +1835,8 @@ fn main() {
                 state_snapshot,
                 transcript_mode,
                 llm_config,
+                whisper_health,
+                bundled_llama,
                 level: level.clone(),
                 model_dir,
                 manifest_path,

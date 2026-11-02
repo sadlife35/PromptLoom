@@ -9,9 +9,11 @@ pub mod download;
 pub mod manifest;
 pub mod wav;
 pub mod whisper;
+pub mod whisper_server;
 
 pub use manifest::{
     find_model, load_all_manifest, load_manifest, verify_hash, ManifestError, ModelManifest,
 };
 pub use wav::{load_wav_fixture, WavFixtureError};
-pub use whisper::{WhisperError, WhisperTranscriber};
+pub use whisper::{clean_transcript, ServerHealth, WhisperError, WhisperTranscriber};
+pub use whisper_server::WhisperServer;

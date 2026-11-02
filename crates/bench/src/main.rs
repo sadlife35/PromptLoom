@@ -10,7 +10,6 @@
 //! fail the whole run if a `.wav` or `.pcm` remains. Nothing in this binary
 //! is for CI — it runs on your laptop against your voice.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -23,7 +22,10 @@ use promptloom_vocabulary::{Capitalizer, Polisher, Vocabulary};
 const WARM_SAMPLES: usize = 5;
 
 #[derive(Parser)]
-#[command(name = "promptloom-bench", about = "End-to-end latency + residue harness")]
+#[command(
+    name = "promptloom-bench",
+    about = "End-to-end latency + residue harness"
+)]
 struct Args {
     /// Path to the ggml model (same file the Tauri app uses).
     #[arg(long)]
@@ -133,7 +135,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!("Model : {}", args.model.display());
-    println!("Fixtures : {} files in {}", fixtures.len(), args.fixtures.display());
+    println!(
+        "Fixtures : {} files in {}",
+        fixtures.len(),
+        args.fixtures.display()
+    );
     println!("Scratch dir : {}", scratch_dir.display());
     println!();
 
@@ -154,7 +160,9 @@ fn main() -> anyhow::Result<()> {
         // Cold: fresh WhisperTranscriber load.
         let t0 = Instant::now();
         let mut transcriber = WhisperTranscriber::load(&args.model)?;
-        let cold_transcript = transcriber.transcribe(&audio).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cold_transcript = transcriber
+            .transcribe(&audio)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let cold = t0.elapsed();
 
         // Residue check after cold.
@@ -169,7 +177,9 @@ fn main() -> anyhow::Result<()> {
         let mut last_transcript = cold_transcript.clone();
         for _ in 0..WARM_SAMPLES {
             let t = Instant::now();
-            last_transcript = transcriber.transcribe(&audio).map_err(|e| anyhow::anyhow!("{e}"))?;
+            last_transcript = transcriber
+                .transcribe(&audio)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             warm.push(t.elapsed());
         }
         let residue_warm = scan_scratch(&scratch_dir);
@@ -210,7 +220,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Suite-level p50/p95 across all fixtures' warm runs.
-    let all_warm: Vec<Duration> = results.iter().flat_map(|r| vec![r.warm_p50, r.warm_p95]).collect();
+    let all_warm: Vec<Duration> = results
+        .iter()
+        .flat_map(|r| vec![r.warm_p50, r.warm_p95])
+        .collect();
     let suite_p50 = percentile(results.iter().map(|r| r.warm_p50).collect(), 0.50);
     let suite_p95 = percentile(results.iter().map(|r| r.warm_p95).collect(), 0.95);
 
@@ -220,13 +233,10 @@ fn main() -> anyhow::Result<()> {
     println!("Residue leaks  : {total_residue_leaks} (must be 0)");
 
     // Write the Markdown report.
-    let out = args
-        .out
-        .clone()
-        .unwrap_or_else(|| {
-            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            PathBuf::from(format!("benches/results/{ts}.md"))
-        });
+    let out = args.out.clone().unwrap_or_else(|| {
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        PathBuf::from(format!("benches/results/{ts}.md"))
+    });
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }

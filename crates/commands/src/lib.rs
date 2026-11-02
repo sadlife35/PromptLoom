@@ -21,22 +21,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Which family of substitutions applies at parse time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptMode {
     /// Default prose dictation: all commands active.
+    #[default]
     Normal,
     /// Code editor target: skip sentence punctuation, keep structural
     /// commands (new line, brackets, symbols). Preserves verbatim case.
     Code,
     /// Terminal target: like Code, no auto-caps, no auto-period.
     Terminal,
-}
-
-impl Default for TranscriptMode {
-    fn default() -> Self {
-        TranscriptMode::Normal
-    }
 }
 
 impl TranscriptMode {
@@ -65,55 +60,224 @@ struct Command {
 
 const COMMANDS: &[Command] = &[
     // Punctuation (prose only).
-    Command { phrase: &["comma"], replacement: ",", sentence_punct: true },
-    Command { phrase: &["period"], replacement: ".", sentence_punct: true },
-    Command { phrase: &["full", "stop"], replacement: ".", sentence_punct: true },
-    Command { phrase: &["question", "mark"], replacement: "?", sentence_punct: true },
-    Command { phrase: &["exclamation", "point"], replacement: "!", sentence_punct: true },
-    Command { phrase: &["exclamation", "mark"], replacement: "!", sentence_punct: true },
-    Command { phrase: &["colon"], replacement: ":", sentence_punct: true },
-    Command { phrase: &["semicolon"], replacement: ";", sentence_punct: true },
-    Command { phrase: &["open", "quote"], replacement: "\"", sentence_punct: true },
-    Command { phrase: &["close", "quote"], replacement: "\"", sentence_punct: true },
-    Command { phrase: &["apostrophe"], replacement: "'", sentence_punct: true },
-
+    Command {
+        phrase: &["comma"],
+        replacement: ",",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["period"],
+        replacement: ".",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["full", "stop"],
+        replacement: ".",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["question", "mark"],
+        replacement: "?",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["exclamation", "point"],
+        replacement: "!",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["exclamation", "mark"],
+        replacement: "!",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["colon"],
+        replacement: ":",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["semicolon"],
+        replacement: ";",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["open", "quote"],
+        replacement: "\"",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["close", "quote"],
+        replacement: "\"",
+        sentence_punct: true,
+    },
+    Command {
+        phrase: &["apostrophe"],
+        replacement: "'",
+        sentence_punct: true,
+    },
     // Structural (all modes).
-    Command { phrase: &["new", "line"], replacement: "\n", sentence_punct: false },
-    Command { phrase: &["new", "paragraph"], replacement: "\n\n", sentence_punct: false },
-    Command { phrase: &["tab"], replacement: "\t", sentence_punct: false },
-    Command { phrase: &["space"], replacement: " ", sentence_punct: false },
-
+    Command {
+        phrase: &["new", "line"],
+        replacement: "\n",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["new", "paragraph"],
+        replacement: "\n\n",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["tab"],
+        replacement: "\t",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["space"],
+        replacement: " ",
+        sentence_punct: false,
+    },
     // Brackets (all modes).
-    Command { phrase: &["open", "paren"], replacement: "(", sentence_punct: false },
-    Command { phrase: &["close", "paren"], replacement: ")", sentence_punct: false },
-    Command { phrase: &["open", "parenthesis"], replacement: "(", sentence_punct: false },
-    Command { phrase: &["close", "parenthesis"], replacement: ")", sentence_punct: false },
-    Command { phrase: &["open", "bracket"], replacement: "[", sentence_punct: false },
-    Command { phrase: &["close", "bracket"], replacement: "]", sentence_punct: false },
-    Command { phrase: &["open", "brace"], replacement: "{", sentence_punct: false },
-    Command { phrase: &["close", "brace"], replacement: "}", sentence_punct: false },
-    Command { phrase: &["open", "angle", "bracket"], replacement: "<", sentence_punct: false },
-    Command { phrase: &["close", "angle", "bracket"], replacement: ">", sentence_punct: false },
-
+    Command {
+        phrase: &["open", "paren"],
+        replacement: "(",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["close", "paren"],
+        replacement: ")",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["open", "parenthesis"],
+        replacement: "(",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["close", "parenthesis"],
+        replacement: ")",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["open", "bracket"],
+        replacement: "[",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["close", "bracket"],
+        replacement: "]",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["open", "brace"],
+        replacement: "{",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["close", "brace"],
+        replacement: "}",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["open", "angle", "bracket"],
+        replacement: "<",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["close", "angle", "bracket"],
+        replacement: ">",
+        sentence_punct: false,
+    },
     // Symbols (all modes).
-    Command { phrase: &["backslash"], replacement: "\\", sentence_punct: false },
-    Command { phrase: &["forward", "slash"], replacement: "/", sentence_punct: false },
-    Command { phrase: &["slash"], replacement: "/", sentence_punct: false },
-    Command { phrase: &["at", "sign"], replacement: "@", sentence_punct: false },
-    Command { phrase: &["hashtag"], replacement: "#", sentence_punct: false },
-    Command { phrase: &["pound", "sign"], replacement: "#", sentence_punct: false },
-    Command { phrase: &["dollar", "sign"], replacement: "$", sentence_punct: false },
-    Command { phrase: &["percent", "sign"], replacement: "%", sentence_punct: false },
-    Command { phrase: &["ampersand"], replacement: "&", sentence_punct: false },
-    Command { phrase: &["asterisk"], replacement: "*", sentence_punct: false },
-    Command { phrase: &["dash"], replacement: "-", sentence_punct: false },
-    Command { phrase: &["hyphen"], replacement: "-", sentence_punct: false },
-    Command { phrase: &["underscore"], replacement: "_", sentence_punct: false },
-    Command { phrase: &["equals", "sign"], replacement: "=", sentence_punct: false },
-    Command { phrase: &["plus", "sign"], replacement: "+", sentence_punct: false },
-    Command { phrase: &["pipe"], replacement: "|", sentence_punct: false },
-    Command { phrase: &["tilde"], replacement: "~", sentence_punct: false },
-    Command { phrase: &["caret"], replacement: "^", sentence_punct: false },
+    Command {
+        phrase: &["backslash"],
+        replacement: "\\",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["forward", "slash"],
+        replacement: "/",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["slash"],
+        replacement: "/",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["at", "sign"],
+        replacement: "@",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["hashtag"],
+        replacement: "#",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["pound", "sign"],
+        replacement: "#",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["dollar", "sign"],
+        replacement: "$",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["percent", "sign"],
+        replacement: "%",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["ampersand"],
+        replacement: "&",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["asterisk"],
+        replacement: "*",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["dash"],
+        replacement: "-",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["hyphen"],
+        replacement: "-",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["underscore"],
+        replacement: "_",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["equals", "sign"],
+        replacement: "=",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["plus", "sign"],
+        replacement: "+",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["pipe"],
+        replacement: "|",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["tilde"],
+        replacement: "~",
+        sentence_punct: false,
+    },
+    Command {
+        phrase: &["caret"],
+        replacement: "^",
+        sentence_punct: false,
+    },
 ];
 
 /// Parse the transcript, replacing recognized command phrases with their
@@ -208,13 +372,16 @@ fn strip_punct_lower(token: &str) -> String {
 
 /// Punctuation that should attach to the preceding word with no space before it.
 fn is_attaching_punct(repl: &str) -> bool {
-    matches!(repl, "," | "." | "?" | "!" | ":" | ";")
+    matches!(
+        repl,
+        "," | "." | "?" | "!" | ":" | ";" | ")" | "\n" | "\n\n"
+    )
 }
 
 fn maybe_space(out: &mut String) {
     if !out.is_empty() {
         let last = out.chars().last().unwrap();
-        if !matches!(last, ' ' | '\n' | '\t') {
+        if !matches!(last, ' ' | '\n' | '\t' | '(') {
             out.push(' ');
         }
     }
@@ -260,10 +427,7 @@ mod tests {
 
     #[test]
     fn brackets() {
-        assert_eq!(
-            normal("open paren x comma y close paren"),
-            "(x, y)"
-        );
+        assert_eq!(normal("open paren x comma y close paren"), "(x, y)");
         assert_eq!(
             normal("open brace close brace open bracket close bracket"),
             "{ } [ ]"
@@ -297,18 +461,12 @@ mod tests {
 
     #[test]
     fn code_mode_keeps_structural_commands() {
-        assert_eq!(
-            code("fn new paragraph open brace close brace"),
-            "fn\n\n{ }"
-        );
+        assert_eq!(code("fn new paragraph open brace close brace"), "fn\n\n{ }");
     }
 
     #[test]
     fn unknown_tokens_pass_through() {
-        assert_eq!(
-            normal("the quick brown fox"),
-            "the quick brown fox"
-        );
+        assert_eq!(normal("the quick brown fox"), "the quick brown fox");
     }
 
     #[test]
@@ -336,10 +494,7 @@ mod tests {
 
     #[test]
     fn mixed_case_preserved_outside_all_caps() {
-        assert_eq!(
-            normal("hello MixedCase world"),
-            "hello MixedCase world"
-        );
+        assert_eq!(normal("hello MixedCase world"), "hello MixedCase world");
     }
 
     #[test]

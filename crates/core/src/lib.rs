@@ -81,6 +81,9 @@ pub trait AudioSource: Send {
     fn start(&mut self) -> Result<(), PromptLoomError>;
     fn stop(&mut self) -> Result<AudioBuffer, PromptLoomError>;
     fn cancel(&mut self);
+    fn snapshot(&self) -> Option<AudioBuffer> {
+        None
+    }
 }
 
 /// Converts an [`AudioBuffer`] into transcript text. No other component sees

@@ -23,10 +23,11 @@
       {
         "label": "hud",
         "title": "PromptLoom HUD",
-        "width": 220,
-        "height": 60,
+        "width": 160,
+        "height": 44,
         "decorations": false,
         "transparent": true,
+        "shadow": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "focus": false,

@@ -18,6 +18,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub mod llama_server;
+pub use llama_server::{
+    resolve_llama_binary, LlamaError, LlamaHealth, LlamaServer, POLISH_REQUEST_TIMEOUT,
+    POLISH_STARTUP_TIMEOUT,
+};
+
 /// Hard timeout for the entire request. If Ollama is slower than this on
 /// first-token, we return the raw transcript rather than block the user.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -99,10 +105,13 @@ impl OllamaClient {
             .timeout(Duration::from_millis(1000))
             .build();
         let url = format!("{}/api/tags", self.endpoint);
-        let resp = agent.get(&url).call().map_err(|e| OllamaError::Unreachable {
-            endpoint: self.endpoint.clone(),
-            reason: e.to_string(),
-        })?;
+        let resp = agent
+            .get(&url)
+            .call()
+            .map_err(|e| OllamaError::Unreachable {
+                endpoint: self.endpoint.clone(),
+                reason: e.to_string(),
+            })?;
         let body: TagsResponse = resp
             .into_json()
             .map_err(|e| OllamaError::Malformed(e.to_string()))?;
@@ -116,9 +125,7 @@ impl OllamaClient {
             return Ok(text.to_string());
         }
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout(REQUEST_TIMEOUT)
-            .build();
+        let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
         let url = format!("{}/api/generate", self.endpoint);
         let body = GenerateRequest {
             model,
@@ -208,7 +215,10 @@ mod tests {
         };
         let err = client.clean("llama3.2:3b", "hello").unwrap_err();
         assert!(
-            matches!(err, OllamaError::Unreachable { .. } | OllamaError::Timeout { .. }),
+            matches!(
+                err,
+                OllamaError::Unreachable { .. } | OllamaError::Timeout { .. }
+            ),
             "expected Unreachable or Timeout, got {err:?}"
         );
     }

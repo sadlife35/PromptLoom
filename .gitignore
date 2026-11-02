@@ -16,6 +16,9 @@ models/*.bin
 models/*.gguf
 *.part
 
+# Tools and prebuilt sidecars (downloaded / unpacked locally)
+tools/
+
 # ASR fixtures are user-consented recordings; never committed.
 crates/asr/tests/fixtures/*.wav
 

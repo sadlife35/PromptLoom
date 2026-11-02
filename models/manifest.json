@@ -1,13 +1,22 @@
 {
   "models": [
     {
+      "name": "ggml-small.en",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+      "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+      "version": "whisper.cpp ggml small.en",
+      "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
+      "size_bytes": 487614201,
+      "note": "Recommended. Clearly better on technical speech, names, and accents. ~466 MB, 2–3x slower than base on CPU."
+    },
+    {
       "name": "ggml-base.en",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
       "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
       "version": "whisper.cpp ggml base.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 147951465,
-      "note": "Balanced default. ~1s inference on an average CPU."
+      "note": "Balanced. Good for most prose dictation. ~148 MB, ~1s inference on an average CPU."
     },
     {
       "name": "ggml-tiny.en",
@@ -16,7 +25,16 @@
       "version": "whisper.cpp ggml tiny.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 77691713,
-      "note": "Faster alternative (~2x). Noticeably worse WER but acceptable for short-form dictation. If upstream republishes, recompute the SHA locally with Get-FileHash."
+      "note": "Fastest. Good for drafts and casual notes on older hardware. ~78 MB."
+    },
+    {
+      "name": "ggml-medium.en",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+      "sha256": "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
+      "version": "whisper.cpp ggml medium.en",
+      "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
+      "size_bytes": 1533774781,
+      "note": "Best quality. 2–3x slower than small on CPU, ~1.5 GB download. Pick this if you have a modern CPU or GPU and want maximum accuracy."
     }
   ]
 }

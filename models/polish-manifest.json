@@ -1,0 +1,24 @@
+{
+  "models": [
+    {
+      "name": "qwen2.5-1.5b-instruct",
+      "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
+      "size_bytes": 1117320736,
+      "license_url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct",
+      "default": true,
+      "note": "Recommended. 1.1 GB, instruction-tuned, strong one-pass cleanup. Runs comfortably on CPU with 4 GB free RAM."
+    },
+    {
+      "name": "llama-3.2-3b-instruct",
+      "filename": "llama-3.2-3b-instruct-q4_k_m.gguf",
+      "url": "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "sha256": "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
+      "size_bytes": 2019377696,
+      "license_url": "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct",
+      "default": false,
+      "note": "Larger alternative. 2 GB, better at nuanced register preservation. Needs 6 GB free RAM."
+    }
+  ]
+}

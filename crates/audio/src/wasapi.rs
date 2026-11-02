@@ -48,6 +48,7 @@ pub struct WasapiAudioSource {
     receiver: Option<Receiver<Vec<i16>>>,
     overflow_count: Arc<AtomicUsize>,
     level: LevelMeter,
+    recorded_samples: Arc<std::sync::Mutex<Vec<i16>>>,
 }
 
 impl WasapiAudioSource {
@@ -79,6 +80,7 @@ impl WasapiAudioSource {
             receiver: None,
             overflow_count: Arc::new(AtomicUsize::new(0)),
             level: LevelMeter::default(),
+            recorded_samples: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -95,6 +97,7 @@ impl WasapiAudioSource {
         let channels = self.config.channels() as usize;
         let overflow = self.overflow_count.clone();
         let level = self.level.clone();
+        let recorded = self.recorded_samples.clone();
 
         let err_fn = |err| tracing::warn!(?err, "audio input stream error");
 
@@ -102,7 +105,9 @@ impl WasapiAudioSource {
             SampleFormat::F32 => self.device.build_input_stream(
                 &self.config.config(),
                 move |data: &[f32], _| {
-                    push_chunk(data, channels, input_rate, &tx, &overflow, &level);
+                    push_chunk(
+                        data, channels, input_rate, &tx, &overflow, &level, &recorded,
+                    );
                 },
                 err_fn,
                 None,
@@ -114,7 +119,9 @@ impl WasapiAudioSource {
                     move |data: &[i16], _| {
                         let as_f32: Vec<f32> =
                             data.iter().map(|s| *s as f32 / i16::MAX as f32).collect();
-                        push_chunk(&as_f32, channels, input_rate, &tx, &overflow, &level);
+                        push_chunk(
+                            &as_f32, channels, input_rate, &tx, &overflow, &level, &recorded,
+                        );
                     },
                     err_fn,
                     None,
@@ -129,7 +136,9 @@ impl WasapiAudioSource {
                             .iter()
                             .map(|s| (*s as f32 - 32_768.0) / 32_768.0)
                             .collect();
-                        push_chunk(&as_f32, channels, input_rate, &tx, &overflow, &level);
+                        push_chunk(
+                            &as_f32, channels, input_rate, &tx, &overflow, &level, &recorded,
+                        );
                     },
                     err_fn,
                     None,
@@ -152,12 +161,16 @@ fn push_chunk(
     tx: &SyncSender<Vec<i16>>,
     overflow: &AtomicUsize,
     level: &LevelMeter,
+    recorded: &Arc<std::sync::Mutex<Vec<i16>>>,
 ) {
     let samples = downmix_and_resample(data, channels, input_rate, TARGET_RATE_HZ);
     if samples.is_empty() {
         return;
     }
     level.set(rms_level(&samples));
+    if let Ok(mut lock) = recorded.lock() {
+        lock.extend_from_slice(&samples);
+    }
     match tx.try_send(samples) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) => {
@@ -171,6 +184,9 @@ impl AudioSource for WasapiAudioSource {
     fn start(&mut self) -> Result<(), PromptLoomError> {
         if self.stream.is_some() {
             return Ok(());
+        }
+        if let Ok(mut lock) = self.recorded_samples.lock() {
+            lock.clear();
         }
         let (tx, rx) = sync_channel::<Vec<i16>>(CHANNEL_CAPACITY);
         let stream = self.build_stream(tx)?;
@@ -186,14 +202,12 @@ impl AudioSource for WasapiAudioSource {
 
     fn stop(&mut self) -> Result<AudioBuffer, PromptLoomError> {
         self.stream.take();
-        let rx = self
-            .receiver
-            .take()
-            .ok_or(PromptLoomError::AudioUnavailable)?;
-        let mut samples = Vec::new();
-        while let Ok(chunk) = rx.try_recv() {
-            samples.extend_from_slice(&chunk);
-        }
+        let _ = self.receiver.take();
+        let samples = self
+            .recorded_samples
+            .lock()
+            .map(|mut l| std::mem::take(&mut *l))
+            .unwrap_or_default();
         self.level.set(0.0);
         Ok(AudioBuffer {
             sample_rate_hz: TARGET_RATE_HZ,
@@ -204,7 +218,22 @@ impl AudioSource for WasapiAudioSource {
     fn cancel(&mut self) {
         self.stream.take();
         self.receiver.take();
+        if let Ok(mut lock) = self.recorded_samples.lock() {
+            lock.clear();
+        }
         self.level.set(0.0);
+    }
+
+    fn snapshot(&self) -> Option<AudioBuffer> {
+        let lock = self.recorded_samples.lock().ok()?;
+        if lock.is_empty() {
+            None
+        } else {
+            Some(AudioBuffer {
+                sample_rate_hz: TARGET_RATE_HZ,
+                samples: lock.clone(),
+            })
+        }
     }
 }
 
