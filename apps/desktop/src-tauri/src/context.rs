@@ -17,10 +17,10 @@ use promptloom_commands::TranscriptMode;
 /// doesn't matter.
 const CODE_EXES: &[&str] = &[
     // Primary targets
-    "code.exe",            // VS Code
-    "cursor.exe",          // Cursor
-    "windsurf.exe",        // Windsurf
-    "zed.exe",             // Zed
+    "code.exe",     // VS Code
+    "cursor.exe",   // Cursor
+    "windsurf.exe", // Windsurf
+    "zed.exe",      // Zed
     // JetBrains family
     "idea.exe",
     "idea64.exe",
@@ -58,7 +58,7 @@ const TERMINAL_EXES: &[&str] = &[
     "wezterm-gui.exe",
     "wezterm.exe",
     "alacritty.exe",
-    "mintty.exe",   // Git Bash / MSYS
+    "mintty.exe", // Git Bash / MSYS
     "conemu64.exe",
     "conemu.exe",
     "conhost.exe",

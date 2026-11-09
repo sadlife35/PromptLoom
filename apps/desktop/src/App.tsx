@@ -377,17 +377,7 @@ export function App() {
             </p>
           </div>
         )}
-        {section === "dictionary" && (
-          <div className="pl-stub">
-            <h2>Dictionary</h2>
-            <p>
-              Teach PromptLoom your team's unusual terms. Today, this is loaded
-              from <code className="pl-inline">.promptloom/terms.yml</code> in a
-              project folder you choose in Settings. An in-app editor is on the
-              roadmap.
-            </p>
-          </div>
-        )}
+        {section === "dictionary" && <DictionaryPage setNotices={setNotices} />}
         {section === "snippets" && (
           <div className="pl-stub">
             <h2>Snippets</h2>
@@ -590,6 +580,347 @@ function DictationPage({
         )}
       </div>
     </>
+  );
+}
+
+/* ---------------------------- Dictionary page ---------------------------- */
+
+function AppProfilesSection() {
+  const [profiles, setProfiles] = useState<[string, string][]>([]);
+  const [exe, setExe] = useState("");
+  const [tone, setTone] = useState<"casual" | "formal">("casual");
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = () =>
+    invoke<[string, string][]>("list_app_profiles")
+      .then(setProfiles)
+      .catch((e) => setErr(String(e)));
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const add = async () => {
+    if (!exe.trim()) return;
+    setErr(null);
+    try {
+      const next = await invoke<[string, string][]>("set_app_profile", {
+        exe: exe.trim(),
+        tone,
+      });
+      setProfiles(next);
+      setExe("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const remove = async (e: string) => {
+    try {
+      const next = await invoke<[string, string][]>("remove_app_profile", {
+        exe: e,
+      });
+      setProfiles(next);
+    } catch (err) {
+      setErr(String(err));
+    }
+  };
+
+  return (
+    <section className="pl-section">
+      <div className="pl-section-label">Per-app style (optional)</div>
+      <div className="pl-card">
+        <div className="pl-card-body" style={{ marginBottom: 12 }}>
+          Give specific apps a tone. The bundled polish model rewrites your
+          transcript in that register before it's pasted. Only applies when
+          the app isn't already detected as Code or Terminal. Example:{" "}
+          <code className="pl-inline">slack.exe</code> → casual,{" "}
+          <code className="pl-inline">outlook.exe</code> → formal.
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <input
+            className="pl-input pl-mono"
+            style={{ flex: 1 }}
+            placeholder="slack.exe"
+            value={exe}
+            onChange={(ev) => setExe(ev.target.value)}
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter") add();
+            }}
+          />
+          <select
+            className="pl-input"
+            value={tone}
+            onChange={(ev) => setTone(ev.target.value as "casual" | "formal")}
+          >
+            <option value="casual">casual</option>
+            <option value="formal">formal</option>
+          </select>
+          <button className="pl-btn primary" onClick={add}>
+            Add
+          </button>
+        </div>
+
+        {err && (
+          <div className="pl-notice danger" style={{ marginBottom: 12 }}>
+            {err}
+          </div>
+        )}
+
+        {profiles.length === 0 ? (
+          <div className="pl-muted" style={{ fontSize: 13 }}>
+            No per-app profiles yet. Unlisted apps use the neutral default.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {profiles.map(([e, t]) => (
+              <div
+                key={e}
+                className="pl-row between"
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                }}
+              >
+                <div>
+                  <span className="pl-mono" style={{ fontSize: 13 }}>
+                    {e}
+                  </span>
+                  <span
+                    style={{
+                      marginLeft: 10,
+                      color: "var(--fg-dim)",
+                      fontSize: 12,
+                    }}
+                  >
+                    → {t}
+                  </span>
+                </div>
+                <button className="pl-btn" onClick={() => remove(e)}>
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DictionaryPage({
+  setNotices,
+}: {
+  setNotices: React.Dispatch<React.SetStateAction<string[]>>;
+}) {
+  const [terms, setTerms] = useState<[string, string][]>([]);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [filter, setFilter] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const refresh = () =>
+    invoke<[string, string][]>("list_vocab_terms")
+      .then((t) => setTerms(t))
+      .catch((e) => setNotices((n) => [`list_vocab_terms: ${e}`, ...n]));
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const add = async () => {
+    if (!from.trim() || !to.trim()) return;
+    setSaving(true);
+    try {
+      const next = await invoke<[string, string][]>("add_vocab_term", {
+        from: from.trim(),
+        to: to.trim(),
+      });
+      setTerms(next);
+      setFrom("");
+      setTo("");
+    } catch (e) {
+      setNotices((n) => [`add_vocab_term: ${e}`, ...n]);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (f: string) => {
+    try {
+      const next = await invoke<[string, string][]>("remove_vocab_term", {
+        from: f,
+      });
+      setTerms(next);
+    } catch (e) {
+      setNotices((n) => [`remove_vocab_term: ${e}`, ...n]);
+    }
+  };
+
+  const visible = filter.trim()
+    ? terms.filter(
+        ([f, t]) =>
+          f.toLowerCase().includes(filter.toLowerCase()) ||
+          t.toLowerCase().includes(filter.toLowerCase())
+      )
+    : terms;
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto" }}>
+      <h1
+        style={{
+          fontFamily: "var(--font-display)",
+          fontStyle: "italic",
+          fontWeight: 500,
+          fontSize: 32,
+          margin: "0 0 10px",
+          letterSpacing: "-0.02em",
+        }}
+      >
+        Dictionary
+      </h1>
+      <p
+        style={{
+          color: "var(--fg-dim)",
+          fontSize: 13.5,
+          margin: "0 0 28px",
+          lineHeight: 1.55,
+          maxWidth: 560,
+        }}
+      >
+        Teach PromptLoom to spell your team's unusual terms. Say "super base"
+        once, add the pair below, and every future dictation of "super base"
+        becomes <code className="pl-inline">Supabase</code>. Case-insensitive
+        on input, exact on output. All local.
+      </p>
+
+      <div className="pl-card" style={{ marginBottom: 16 }}>
+        <div className="pl-card-head" style={{ marginBottom: 12 }}>
+          Add a term
+        </div>
+        <div
+          className="pl-row"
+          style={{ gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}
+        >
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div className="pl-section-label" style={{ marginBottom: 4 }}>
+              You say
+            </div>
+            <input
+              className="pl-input"
+              style={{ width: "100%", minWidth: 0 }}
+              value={from}
+              placeholder="super base"
+              onChange={(e) => setFrom(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") add();
+              }}
+            />
+          </div>
+          <div
+            style={{
+              fontSize: 18,
+              color: "var(--fg-very-dim)",
+              paddingBottom: 10,
+            }}
+          >
+            →
+          </div>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div className="pl-section-label" style={{ marginBottom: 4 }}>
+              We type
+            </div>
+            <input
+              className="pl-input"
+              style={{ width: "100%", minWidth: 0 }}
+              value={to}
+              placeholder="Supabase"
+              onChange={(e) => setTo(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") add();
+              }}
+            />
+          </div>
+          <button
+            type="button"
+            className="pl-btn primary"
+            onClick={add}
+            disabled={saving || !from.trim() || !to.trim()}
+          >
+            {saving ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </div>
+
+      <div
+        className="pl-row between"
+        style={{ marginBottom: 10, alignItems: "baseline" }}
+      >
+        <div className="pl-section-label">
+          {visible.length} of {terms.length} term
+          {terms.length === 1 ? "" : "s"}
+        </div>
+        {terms.length > 0 && (
+          <input
+            className="pl-input"
+            style={{ minWidth: 220, fontSize: 12.5 }}
+            placeholder="Filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+        )}
+      </div>
+
+      {terms.length === 0 ? (
+        <div className="pl-hist-empty">
+          Your dictionary is empty. Add a term above to start.
+        </div>
+      ) : (
+        <div className="pl-card" style={{ padding: 0 }}>
+          {visible.map(([f, t]) => (
+            <div
+              key={f}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto 1fr auto",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 16px",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
+              <div className="pl-mono" style={{ fontSize: 13 }}>
+                {f}
+              </div>
+              <div
+                style={{ color: "var(--fg-very-dim)", fontSize: 14 }}
+              >
+                →
+              </div>
+              <div className="pl-mono" style={{ fontSize: 13 }}>
+                {t}
+              </div>
+              <button
+                type="button"
+                className="pl-btn danger"
+                onClick={() => remove(f)}
+                style={{ padding: "4px 10px", fontSize: 11 }}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          {visible.length === 0 && (
+            <div className="pl-hist-empty" style={{ padding: "24px 16px" }}>
+              No matches for "{filter}".
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1014,6 +1345,8 @@ function SettingsPage(p: SettingsPageProps) {
           </div>
         </div>
       </section>
+
+      <AppProfilesSection />
 
       {/* Advanced: Ollama fallthrough */}
       <section className="pl-section">

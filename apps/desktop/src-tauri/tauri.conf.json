@@ -63,7 +63,9 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser"
-      }
+      },
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.sectigo.com"
     }
   }
 }

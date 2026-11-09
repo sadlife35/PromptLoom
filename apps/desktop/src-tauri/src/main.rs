@@ -3,7 +3,8 @@
 mod context;
 mod foreground;
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,15 +15,17 @@ use promptloom_asr::{find_model, load_all_manifest, load_manifest, WhisperTransc
 use promptloom_audio::{
     default_input_device_name, enumerate_input_devices, LevelMeter, MicProbe, WasapiAudioSource,
 };
+use promptloom_commands::{
+    apply as apply_commands, detect_selection_command, SelectionAction, TranscriptMode,
+};
+use promptloom_core::TextTransformer;
 use promptloom_core::{
     state::ErrorKind, AudioBuffer, DeliveryOutcome, Notice, Orchestrator, OutputSink,
     PromptLoomError, State, TargetWindow, Transcriber,
 };
-use promptloom_commands::{apply as apply_commands, TranscriptMode};
 use promptloom_llm_polish::{
     resolve_llama_binary, LlamaHealth, LlamaServer, OllamaClient, OllamaError, OllamaModel,
 };
-use promptloom_core::TextTransformer;
 use promptloom_output_windows::WindowsClipboardSink;
 use promptloom_vocabulary::{Capitalizer, Polisher, Vocabulary};
 use serde::{Deserialize, Serialize};
@@ -32,6 +35,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutSt
 /// Active transcriber. Starts as Placeholder (surfaces ModelUnavailable so
 /// the user can see the notice); after `download_model` or boot-time load,
 /// swaps to Whisper in place without rebuilding the orchestrator.
+#[allow(clippy::large_enum_variant)]
 enum ActiveTranscriber {
     Whisper(WhisperTranscriber),
     Placeholder,
@@ -75,6 +79,37 @@ struct ClipboardAndHudSink {
 
 impl OutputSink for ClipboardAndHudSink {
     fn deliver(&mut self, text: &str, target: &TargetWindow) -> DeliveryOutcome {
+        // Selection commands dispatch keystrokes to the target window
+        // instead of pasting the recognized text. The target-identity
+        // check still applies — we only send keys if the foreground still
+        // matches the one captured at hotkey-press time.
+        if let Some(action) = detect_selection_command(text) {
+            if promptloom_output_windows::should_paste(
+                target,
+                foreground::capture_foreground().as_ref(),
+            ) {
+                tracing::info!(
+                    ?action,
+                    exe = target.executable.as_str(),
+                    "dispatching selection command via keystrokes"
+                );
+                if dispatch_selection(action).is_ok() {
+                    let _ = self
+                        .app
+                        .emit("promptloom:transcript", format!("[{action:?}]"));
+                    return DeliveryOutcome::Pasted;
+                }
+            } else {
+                tracing::warn!(
+                    ?action,
+                    "focus changed since recording started; skipping selection command"
+                );
+                return DeliveryOutcome::CopyOnly {
+                    reason: "focus changed since recording started",
+                };
+            }
+        }
+
         tracing::info!(
             exe = target.executable.as_str(),
             pid = target.process_id,
@@ -84,6 +119,25 @@ impl OutputSink for ClipboardAndHudSink {
         let _ = self.app.emit("promptloom:transcript", text);
         self.inner.deliver(text, target)
     }
+}
+
+/// Translate one `SelectionAction` into a `SendInput` sequence sent to
+/// whichever window currently has keyboard focus. Caller must have
+/// already verified the foreground still matches the captured target.
+fn dispatch_selection(action: SelectionAction) -> Result<(), String> {
+    use promptloom_output_windows::paste::{keys, send_combo, Mods};
+    let result = match action {
+        SelectionAction::SelectAll => send_combo(keys::A, Mods::CTRL),
+        SelectionAction::SelectLastWord => send_combo(keys::SELECT_LEFT, Mods::CTRL | Mods::SHIFT),
+        SelectionAction::SelectLastLine => send_combo(keys::HOME, Mods::SHIFT),
+        SelectionAction::DeleteSelection => send_combo(keys::DELETE, Mods::NONE),
+        SelectionAction::DeleteLastWord => send_combo(keys::BACKSPACE, Mods::CTRL),
+        SelectionAction::UndoLast => send_combo(keys::Z, Mods::CTRL),
+        SelectionAction::Redo => send_combo(keys::Y, Mods::CTRL),
+        SelectionAction::CopySelection => send_combo(keys::C, Mods::CTRL),
+        SelectionAction::CutSelection => send_combo(keys::X, Mods::CTRL),
+    };
+    result.map_err(|e| e.to_string())
 }
 
 /// Runtime LLM-polish config. Lives in a shared `Arc<Mutex>` between
@@ -134,11 +188,22 @@ struct PolishedVocabulary {
     /// through to the raw text.
     bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
     ollama: OllamaClient,
+    /// Tone override for the next polish call. Set by the worker right
+    /// before dispatch based on the foreground exe's profile. `None` for
+    /// neutral default.
+    tone_override: Arc<Mutex<Option<String>>>,
     app: AppHandle,
 }
 
 impl TextTransformer for PolishedVocabulary {
     fn transform(&self, text: &str) -> String {
+        // Selection commands bypass the entire text pipeline. The sink
+        // will spot the same phrase on delivery and dispatch keystrokes
+        // instead of pasting. Returning the raw text avoids the LLM
+        // polish rewriting "undo that" into something else.
+        if detect_selection_command(text).is_some() {
+            return text.trim().to_string();
+        }
         let mode = *self.mode.lock();
         let after_commands = apply_commands(text, mode);
         let polished = self.polisher.polish(&after_commands);
@@ -157,10 +222,12 @@ impl TextTransformer for PolishedVocabulary {
         // Primary polish: the bundled local llama.cpp sidecar. On by
         // default. Hard 2-second timeout. If the server isn't warm yet,
         // isn't bundled, or the call fails, we fall through — never block.
+        let tone = self.tone_override.lock().clone();
+
         if bundled_enabled {
             let mut slot = self.bundled_llama.lock();
             if let Some(server) = slot.as_mut() {
-                match server.polish(&after_vocab) {
+                match server.polish_with_tone(&after_vocab, tone.as_deref()) {
                     Ok(cleaned) if !cleaned.trim().is_empty() => return cleaned,
                     Ok(_) => {
                         tracing::debug!("bundled polish returned empty; falling through");
@@ -206,6 +273,7 @@ type Orch =
 /// Commands sent to the single-threaded orchestrator worker. All work that
 /// mutates the orchestrator (press, release, cancel, vocab swap, transcriber
 /// swap) goes through this channel so no UI call ever blocks on whisper.
+#[allow(clippy::large_enum_variant)]
 enum WorkerCmd {
     HotkeyPressed(TargetWindow),
     HotkeyReleased,
@@ -235,6 +303,16 @@ struct AppState {
     /// Managed `llama-server` sidecar for bundled transcript polish.
     /// `None` until startup completes (first dictation may skip polish).
     bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
+    /// Tone override written by the worker before each dictation based on
+    /// the foreground executable's profile. `PolishedVocabulary` reads
+    /// this during polish. `None` means neutral default.
+    tone_override: Arc<Mutex<Option<String>>>,
+    /// Live, mutable vocabulary terms. Source phrase (lowercased) →
+    /// destination spelling. Mutated by the Dictionary UI; rebuilt into a
+    /// `Vocabulary` and sent through `WorkerCmd::ReloadVocabulary` after
+    /// every edit. Persisted to `<project>/.promptloom/terms.yml` if a
+    /// project is set, otherwise to `<app_data>/terms.yml`.
+    vocab_terms: Arc<Mutex<BTreeMap<String, String>>>,
     level: LevelMeter,
     model_dir: PathBuf,
     manifest_path: PathBuf,
@@ -281,6 +359,22 @@ struct Settings {
     /// first installed polish model from the manifest" at startup.
     #[serde(default)]
     bundled_polish_model: Option<String>,
+    /// Per-app style overrides, keyed by foreground executable basename
+    /// (case-insensitive, e.g. "slack.exe"). Values are tone names:
+    /// "casual" | "formal". Unlisted apps use the neutral default.
+    /// Code/Terminal built-in modes still win over this when they match.
+    #[serde(default)]
+    app_profiles: BTreeMap<String, String>,
+}
+
+const ALLOWED_TONES: &[&str] = &["casual", "formal"];
+
+fn normalize_exe(exe: &str) -> String {
+    std::path::Path::new(exe)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(exe)
+        .to_ascii_lowercase()
 }
 
 fn default_auto_context() -> bool {
@@ -346,8 +440,7 @@ fn save_settings(path: &std::path::Path, settings: &Settings) -> std::io::Result
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(settings)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let bytes = serde_json::to_vec_pretty(settings).map_err(std::io::Error::other)?;
     std::fs::write(path, bytes)
 }
 
@@ -365,6 +458,63 @@ fn vocabulary_from_project(project_path: &str) -> Option<Vocabulary> {
             None
         }
     }
+}
+
+/// Resolve the path we should read/write the vocabulary YAML to.
+///
+/// Priority: a configured project folder's `.promptloom/terms.yml`;
+/// otherwise a global file in the app data dir so users can manage
+/// vocabulary without creating a project.
+fn resolve_vocab_write_path(
+    app: &AppHandle,
+    project_path: Option<&str>,
+) -> std::io::Result<PathBuf> {
+    if let Some(p) = project_path.filter(|p| !p.trim().is_empty()) {
+        let dir = Path::new(p).join(".promptloom");
+        std::fs::create_dir_all(&dir)?;
+        return Ok(dir.join("terms.yml"));
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+    std::fs::create_dir_all(&data_dir)?;
+    Ok(data_dir.join("terms.yml"))
+}
+
+/// Read a vocabulary YAML file into an ordered term map. Missing file is
+/// not an error — returns empty. Invalid YAML returns empty with a warn.
+fn read_terms_file(path: &Path) -> BTreeMap<String, String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    #[derive(serde::Deserialize)]
+    struct TermsFile {
+        #[serde(default)]
+        terms: BTreeMap<String, String>,
+    }
+    match serde_yaml::from_slice::<TermsFile>(&bytes) {
+        Ok(tf) => tf.terms,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), ?e, "terms.yml parse failed; using empty");
+            BTreeMap::new()
+        }
+    }
+}
+
+/// Serialize the term map to the same YAML schema `promptloom-vocabulary`
+/// reads.
+fn write_terms_file(path: &Path, terms: &BTreeMap<String, String>) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct TermsFile<'a> {
+        terms: &'a BTreeMap<String, String>,
+    }
+    let out = serde_yaml::to_string(&TermsFile { terms })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, out)
 }
 
 #[derive(Serialize, Clone)]
@@ -550,10 +700,7 @@ fn set_ollama_model(
 }
 
 #[tauri::command]
-fn set_auto_context(
-    enabled: bool,
-    state: tauri::State<'_, AppState>,
-) -> Result<Settings, String> {
+fn set_auto_context(enabled: bool, state: tauri::State<'_, AppState>) -> Result<Settings, String> {
     let mut settings = state.settings.lock();
     settings.auto_context = enabled;
     save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
@@ -579,10 +726,7 @@ fn set_transcript_mode(
 }
 
 #[tauri::command]
-fn set_dictation_mode(
-    state: tauri::State<'_, AppState>,
-    mode: String,
-) -> Result<Settings, String> {
+fn set_dictation_mode(state: tauri::State<'_, AppState>, mode: String) -> Result<Settings, String> {
     if !ALLOWED_MODES.contains(&mode.as_str()) {
         return Err(format!(
             "mode {mode:?} not in allowed set {:?}",
@@ -645,7 +789,9 @@ fn set_project_path(
     };
     let terms_count = new_vocab.len();
 
-    let _ = state.worker_tx.try_send(WorkerCmd::ReloadVocabulary(new_vocab));
+    let _ = state
+        .worker_tx
+        .try_send(WorkerCmd::ReloadVocabulary(new_vocab));
 
     let mut settings = state.settings.lock();
     settings.project_path = path.filter(|p| !p.trim().is_empty());
@@ -883,9 +1029,8 @@ fn remove_model_cmd(
     // Safety: both paths must be canonicalizable and the model file must be
     // strictly inside the managed model directory. Rejects any symlink or
     // walk-out attempt even though the UI never passes a path.
-    let dir_canon = std::fs::canonicalize(model_dir).map_err(|e| {
-        format!("Model directory not accessible: {e}")
-    })?;
+    let dir_canon = std::fs::canonicalize(model_dir)
+        .map_err(|e| format!("Model directory not accessible: {e}"))?;
     if !path.exists() {
         return Ok(RemoveReport {
             removed: false,
@@ -965,10 +1110,7 @@ fn download_model_cmd(app: AppHandle, state: tauri::State<'_, AppState>) -> Resu
             }
             Err(e) => {
                 tracing::warn!(?e, "model download failed");
-                let _ = app.emit(
-                    "promptloom:notice",
-                    format!("download failed: {e}"),
-                );
+                let _ = app.emit("promptloom:notice", format!("download failed: {e}"));
                 let _ = app.emit("promptloom:download-done", false);
             }
         }
@@ -1126,7 +1268,7 @@ fn show_hud(app: &AppHandle) {
         // dock, external display plug/unplug) and we want center-bottom
         // of the primary (currently focused) monitor each time.
         if let Ok(Some(monitor)) = w.current_monitor() {
-            let size = w.outer_size().unwrap_or_else(|_| tauri::PhysicalSize {
+            let size = w.outer_size().unwrap_or(tauri::PhysicalSize {
                 width: 160,
                 height: 44,
             });
@@ -1155,7 +1297,7 @@ fn resolve_polish_model_path(
     preferred_name: Option<&str>,
 ) -> Option<PathBuf> {
     let polish_dir = model_dir.join("polish");
-    let candidates: &[PathBuf] = &[polish_dir.clone()];
+    let candidates: &[PathBuf] = std::slice::from_ref(&polish_dir);
 
     // Also try tools/ relative to cwd + ancestors (dev convenience).
     let mut tool_dirs: Vec<PathBuf> = Vec::new();
@@ -1228,18 +1370,12 @@ fn start_llama_server_async(
                 tracing::info!(
                     "no polish model found; bundled polish disabled until one is installed"
                 );
-                let _ = app.emit(
-                    "promptloom:llama-health",
-                    &LlamaHealth::Disabled,
-                );
+                let _ = app.emit("promptloom:llama-health", &LlamaHealth::Disabled);
                 return;
             };
             let Some(binary) = resolve_llama_binary(&model_path) else {
                 tracing::info!("llama-server binary not found; bundled polish disabled");
-                let _ = app.emit(
-                    "promptloom:llama-health",
-                    &LlamaHealth::Disabled,
-                );
+                let _ = app.emit("promptloom:llama-health", &LlamaHealth::Disabled);
                 return;
             };
             match LlamaServer::start(&binary, &model_path) {
@@ -1251,10 +1387,7 @@ fn start_llama_server_async(
                     );
                     let port = server.port();
                     *slot.lock() = Some(server);
-                    let _ = app.emit(
-                        "promptloom:llama-health",
-                        &LlamaHealth::Active { port },
-                    );
+                    let _ = app.emit("promptloom:llama-health", &LlamaHealth::Active { port });
                     let _ = app.emit(
                         "promptloom:notice",
                         "Local polish ready. Transcripts will be cleaned automatically.",
@@ -1262,10 +1395,7 @@ fn start_llama_server_async(
                 }
                 Err(e) => {
                     tracing::warn!(?e, "llama-server failed to start; polish falls through");
-                    let _ = app.emit(
-                        "promptloom:llama-health",
-                        &LlamaHealth::Fallback,
-                    );
+                    let _ = app.emit("promptloom:llama-health", &LlamaHealth::Fallback);
                 }
             }
         })
@@ -1285,6 +1415,7 @@ fn start_level_pump(app: AppHandle, level: LevelMeter) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn init_orchestrator(
     app: &AppHandle,
     model_path: Option<&std::path::Path>,
@@ -1293,6 +1424,7 @@ fn init_orchestrator(
     mode: Arc<Mutex<TranscriptMode>>,
     llm_config: Arc<Mutex<LlmConfig>>,
     bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
+    tone_override: Arc<Mutex<Option<String>>>,
 ) -> Result<(Orch, LevelMeter), PromptLoomError> {
     let audio = WasapiAudioSource::new_with_device(mic_device)?;
     let level = audio.level_meter();
@@ -1324,6 +1456,7 @@ fn init_orchestrator(
         llm_config,
         bundled_llama,
         ollama: OllamaClient::default(),
+        tone_override,
         app: app.clone(),
     };
     let orch = Orchestrator::new(audio, transcriber, text_transformer, sink);
@@ -1393,9 +1526,7 @@ fn cancel_dictation(app: AppHandle) {
 }
 
 #[tauri::command]
-fn whisper_server_status(
-    state: tauri::State<'_, AppState>,
-) -> promptloom_asr::ServerHealth {
+fn whisper_server_status(state: tauri::State<'_, AppState>) -> promptloom_asr::ServerHealth {
     state.whisper_health.lock().clone()
 }
 
@@ -1413,6 +1544,94 @@ fn polish_server_status(state: tauri::State<'_, AppState>) -> LlamaHealth {
     }
 }
 
+/// Return the full vocabulary as an ordered list of `[from, to]` pairs,
+/// stable and alphabetical by source phrase. Case-insensitively sorted so
+/// the UI renders deterministically.
+#[tauri::command]
+fn list_vocab_terms(state: tauri::State<'_, AppState>) -> Vec<(String, String)> {
+    state
+        .vocab_terms
+        .lock()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Add or replace one term. `from` is normalized (trimmed, lowercased);
+/// `to` is kept as-is so case in the destination is honored. Persists to
+/// disk and reloads the orchestrator's vocabulary.
+#[tauri::command]
+fn add_vocab_term(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<Vec<(String, String)>, String> {
+    let from = from.trim().to_string();
+    let to = to.trim().to_string();
+    if from.is_empty() || to.is_empty() {
+        return Err("both 'from' and 'to' are required".into());
+    }
+
+    let (new_vocab, snapshot) = {
+        let mut terms = state.vocab_terms.lock();
+        terms.insert(from.to_lowercase(), to);
+        let snapshot = terms.clone();
+        (Vocabulary::from_map(snapshot.clone()), snapshot)
+    };
+
+    let project_path = state.settings.lock().project_path.clone();
+    let path =
+        resolve_vocab_write_path(&app, project_path.as_deref()).map_err(|e| e.to_string())?;
+    write_terms_file(&path, &snapshot).map_err(|e| e.to_string())?;
+
+    {
+        let mut settings = state.settings.lock();
+        settings.terms_count = snapshot.len();
+        save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    }
+
+    let _ = state
+        .worker_tx
+        .try_send(WorkerCmd::ReloadVocabulary(new_vocab));
+    Ok(snapshot.into_iter().collect())
+}
+
+#[tauri::command]
+fn remove_vocab_term(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    from: String,
+) -> Result<Vec<(String, String)>, String> {
+    let from_lower = from.trim().to_lowercase();
+    if from_lower.is_empty() {
+        return Err("'from' is required".into());
+    }
+
+    let (new_vocab, snapshot) = {
+        let mut terms = state.vocab_terms.lock();
+        terms.remove(&from_lower);
+        let snapshot = terms.clone();
+        (Vocabulary::from_map(snapshot.clone()), snapshot)
+    };
+
+    let project_path = state.settings.lock().project_path.clone();
+    let path =
+        resolve_vocab_write_path(&app, project_path.as_deref()).map_err(|e| e.to_string())?;
+    write_terms_file(&path, &snapshot).map_err(|e| e.to_string())?;
+
+    {
+        let mut settings = state.settings.lock();
+        settings.terms_count = snapshot.len();
+        save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    }
+
+    let _ = state
+        .worker_tx
+        .try_send(WorkerCmd::ReloadVocabulary(new_vocab));
+    Ok(snapshot.into_iter().collect())
+}
+
 #[tauri::command]
 fn set_bundled_polish_enabled(
     enabled: bool,
@@ -1423,6 +1642,55 @@ fn set_bundled_polish_enabled(
     state.llm_config.lock().bundled_enabled = enabled;
     save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
     Ok(settings.clone())
+}
+
+#[tauri::command]
+fn list_app_profiles(state: tauri::State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
+    let settings = state.settings.lock();
+    Ok(settings
+        .app_profiles
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect())
+}
+
+#[tauri::command]
+fn set_app_profile(
+    exe: String,
+    tone: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    if !ALLOWED_TONES.contains(&tone.as_str()) {
+        return Err(format!("tone must be one of: {}", ALLOWED_TONES.join(", ")));
+    }
+    let key = normalize_exe(&exe);
+    if key.is_empty() {
+        return Err("exe is required".into());
+    }
+    let mut settings = state.settings.lock();
+    settings.app_profiles.insert(key, tone);
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings
+        .app_profiles
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect())
+}
+
+#[tauri::command]
+fn remove_app_profile(
+    exe: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    let key = normalize_exe(&exe);
+    let mut settings = state.settings.lock();
+    settings.app_profiles.remove(&key);
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings
+        .app_profiles
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect())
 }
 
 /// The orchestrator worker. Owns `Orch` exclusively; receives commands via
@@ -1466,7 +1734,7 @@ fn spawn_orchestrator_worker(
                             retry_after_ms,
                             ..
                         } => {
-                            let secs = (retry_after_ms + 999) / 1000;
+                            let secs = retry_after_ms.div_ceil(1000);
                             let _ = app.emit(
                                 "promptloom:notice",
                                 format!(
@@ -1477,10 +1745,7 @@ fn spawn_orchestrator_worker(
                         }
                         promptloom_asr::ServerHealth::Active { .. } => {
                             if last.is_some() {
-                                let _ = app.emit(
-                                    "promptloom:notice",
-                                    "Streaming restored.",
-                                );
+                                let _ = app.emit("promptloom:notice", "Streaming restored.");
                             }
                         }
                         promptloom_asr::ServerHealth::Disabled => {}
@@ -1521,9 +1786,11 @@ fn spawn_orchestrator_worker(
                             // PolishedVocabulary reads during polish.
                             {
                                 let app_state = app.state::<AppState>();
-                                let (auto, user_mode_str) = {
+                                let (auto, user_mode_str, profile_tone) = {
                                     let s = app_state.settings.lock();
-                                    (s.auto_context, s.transcript_mode.clone())
+                                    let key = normalize_exe(&target.executable);
+                                    let tone = s.app_profiles.get(&key).cloned();
+                                    (s.auto_context, s.transcript_mode.clone(), tone)
                                 };
                                 let user_mode = parse_transcript_mode(&user_mode_str);
                                 let detected = if auto {
@@ -1534,6 +1801,17 @@ fn spawn_orchestrator_worker(
                                 let effective = detected.unwrap_or(user_mode);
                                 *app_state.transcript_mode.lock() = effective;
 
+                                // Per-app tone override: only active when the
+                                // effective mode is Normal — Code/Terminal have
+                                // their own rules and should not be reshaped by
+                                // a casual/formal rewrite.
+                                let tone_for_dictation = if effective == TranscriptMode::Normal {
+                                    profile_tone
+                                } else {
+                                    None
+                                };
+                                *app_state.tone_override.lock() = tone_for_dictation;
+
                                 if let Some(d) = detected {
                                     if d != user_mode {
                                         let label = match d {
@@ -1543,10 +1821,7 @@ fn spawn_orchestrator_worker(
                                         };
                                         let _ = app.emit(
                                             "promptloom:notice",
-                                            format!(
-                                                "{label} mode (auto · {})",
-                                                target.executable
-                                            ),
+                                            format!("{label} mode (auto · {})", target.executable),
                                         );
                                     }
                                 }
@@ -1610,7 +1885,9 @@ fn spawn_orchestrator_worker(
                             if snapshot.duration() >= Duration::from_millis(1500) {
                                 last_snapshot_time = std::time::Instant::now();
                                 let (_, trans_slot, _, _) = orch.components();
-                                match trans_slot.transcribe_partial(&snapshot, last_partial.as_deref()) {
+                                match trans_slot
+                                    .transcribe_partial(&snapshot, last_partial.as_deref())
+                                {
                                     Ok(Some(partial_text)) => {
                                         let trimmed = partial_text.trim();
                                         if !trimmed.is_empty() {
@@ -1633,25 +1910,24 @@ fn spawn_orchestrator_worker(
 }
 
 fn has_terminal_notice(notices: &[Notice]) -> bool {
-    notices
-        .iter()
-        .any(|n| matches!(n, Notice::Delivered(_) | Notice::Cancelled | Notice::TooShort | Notice::Error(_)))
+    notices.iter().any(|n| {
+        matches!(
+            n,
+            Notice::Delivered(_) | Notice::Cancelled | Notice::TooShort | Notice::Error(_)
+        )
+    })
 }
 
 fn terminal_dwell(notices: &[Notice]) -> Duration {
-    for n in notices {
-        match n {
-            Notice::Delivered(DeliveryOutcome::Pasted) => return Duration::from_millis(900),
-            Notice::Delivered(DeliveryOutcome::CopyOnly { .. }) => {
-                return Duration::from_millis(1600);
-            }
-            Notice::Error(_) | Notice::Delivered(DeliveryOutcome::Failed) => {
-                return Duration::from_millis(2400);
-            }
-            Notice::Cancelled | Notice::TooShort => return Duration::from_millis(600),
+    match notices.first() {
+        Some(Notice::Delivered(DeliveryOutcome::Pasted)) => Duration::from_millis(900),
+        Some(Notice::Delivered(DeliveryOutcome::CopyOnly { .. })) => Duration::from_millis(1600),
+        Some(Notice::Error(_) | Notice::Delivered(DeliveryOutcome::Failed)) => {
+            Duration::from_millis(2400)
         }
+        Some(Notice::Cancelled | Notice::TooShort) => Duration::from_millis(600),
+        None => Duration::from_millis(900),
     }
-    Duration::from_millis(900)
 }
 
 fn resolve_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
@@ -1757,6 +2033,12 @@ fn main() {
             whisper_server_status,
             polish_server_status,
             set_bundled_polish_enabled,
+            list_app_profiles,
+            set_app_profile,
+            remove_app_profile,
+            list_vocab_terms,
+            add_vocab_term,
+            remove_vocab_term,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
@@ -1769,17 +2051,23 @@ fn main() {
 
             let model_path = resolve_model_path(&model_dir, &manifest_path, &settings.active_model);
 
-            let vocab = settings
-                .project_path
+            // Load the vocabulary from whichever file the Dictionary UI
+            // would write to — project terms.yml if a project is set,
+            // otherwise the global app_data terms.yml. This keeps the
+            // read + write paths in sync so edits never surprise users.
+            let initial_vocab_path =
+                resolve_vocab_write_path(app.handle(), settings.project_path.as_deref()).ok();
+            let vocab_map: BTreeMap<String, String> = initial_vocab_path
                 .as_deref()
-                .and_then(vocabulary_from_project)
-                .unwrap_or_else(Vocabulary::empty);
+                .map(read_terms_file)
+                .unwrap_or_default();
+            let vocab = Vocabulary::from_map(vocab_map.clone());
+            let vocab_terms = Arc::new(Mutex::new(vocab_map));
             settings.terms_count = vocab.len();
 
             let mic_device = settings.mic_device.clone();
-            let transcript_mode = Arc::new(Mutex::new(parse_transcript_mode(
-                &settings.transcript_mode,
-            )));
+            let transcript_mode =
+                Arc::new(Mutex::new(parse_transcript_mode(&settings.transcript_mode)));
             let llm_config = Arc::new(Mutex::new(LlmConfig {
                 bundled_enabled: settings.bundled_polish_enabled,
                 enabled: settings.ollama_enabled,
@@ -1792,6 +2080,7 @@ fn main() {
                 settings.bundled_polish_model.clone(),
                 &model_dir,
             );
+            let tone_override: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let (orch_opt, level) = match init_orchestrator(
                 app.handle(),
                 model_path.as_deref(),
@@ -1800,6 +2089,7 @@ fn main() {
                 transcript_mode.clone(),
                 llm_config.clone(),
                 bundled_llama.clone(),
+                tone_override.clone(),
             ) {
                 Ok(ol) => (Some(ol.0), Some(ol.1)),
                 Err(e) => {
@@ -1837,6 +2127,8 @@ fn main() {
                 llm_config,
                 whisper_health,
                 bundled_llama,
+                tone_override,
+                vocab_terms,
                 level: level.clone(),
                 model_dir,
                 manifest_path,
@@ -1867,4 +2159,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

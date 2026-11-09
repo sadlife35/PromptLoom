@@ -193,6 +193,16 @@ impl LlamaServer {
 
     /// Send one polish request. Hard timeout: `POLISH_REQUEST_TIMEOUT`.
     pub fn polish(&mut self, text: &str) -> Result<String, LlamaError> {
+        self.polish_with_tone(text, None)
+    }
+
+    /// Polish with an optional tone override. Tone values other than
+    /// "casual" / "formal" are ignored (falls back to neutral prompt).
+    pub fn polish_with_tone(
+        &mut self,
+        text: &str,
+        tone: Option<&str>,
+    ) -> Result<String, LlamaError> {
         if text.trim().is_empty() {
             return Ok(text.to_string());
         }
@@ -200,12 +210,24 @@ impl LlamaServer {
             return Err(LlamaError::Http("llama-server child has exited".into()));
         }
 
+        let tone_prefix = match tone {
+            Some("casual") => {
+                "Rewrite in a casual tone. Use contractions. Keep it \
+                 friendly and conversational. Preserve meaning.\n\n"
+            }
+            Some("formal") => {
+                "Rewrite in a formal tone. No contractions. No slang. \
+                 Professional register. Preserve meaning.\n\n"
+            }
+            _ => "",
+        };
+
         let agent = ureq::AgentBuilder::new()
             .timeout(POLISH_REQUEST_TIMEOUT)
             .build();
         let url = format!("http://127.0.0.1:{}/completion", self.port);
         let body = CompletionRequest {
-            prompt: format!("{POLISH_PROMPT}{text}\n\nOutput:\n"),
+            prompt: format!("{tone_prefix}{POLISH_PROMPT}{text}\n\nOutput:\n"),
             n_predict: 256,
             temperature: 0.2,
             stream: false,

@@ -17,6 +17,8 @@ type ModelStatus = {
   name: string;
   size_bytes: number;
   verified: boolean;
+  engine_installed: boolean;
+  engine_path: string | null;
 };
 
 type MicListing = {
@@ -124,7 +126,11 @@ export function Onboarding(props: { onFinish: () => void }) {
       case "microphone":
         return (mics?.devices.length ?? 0) > 0;
       case "model":
-        return model?.installed === true && model?.verified === true;
+        return (
+          model?.installed === true &&
+          model?.verified === true &&
+          model?.engine_installed === true
+        );
       case "hotkey":
         return !!settings?.hotkey && hotkeyOptions.includes(settings.hotkey);
       case "vocabulary":
@@ -174,397 +180,512 @@ export function Onboarding(props: { onFinish: () => void }) {
       ? Math.round((100 * progress.bytes) / progress.total)
       : 0;
 
-  return (
-    <main style={{ fontFamily: "system-ui", padding: 24, maxWidth: 720 }}>
-      <h1 style={{ margin: 0 }}>Welcome to PromptLoom</h1>
-      <p style={{ color: "#555", marginTop: 4 }}>
-        A short, one-time setup. You can change any of this later in Settings.
-      </p>
+  const headings: Record<Step, { eyebrow: string; title: string; sub: string }> = {
+    privacy: {
+      eyebrow: "Step 1 of 6",
+      title: "You control your data",
+      sub: "A short, one-time setup. Everything stays on this PC.",
+    },
+    microphone: {
+      eyebrow: "Step 2 of 6",
+      title: "Test your microphone",
+      sub: "We recommend built-in or wired mics. Bluetooth works but can lag.",
+    },
+    model: {
+      eyebrow: "Step 3 of 6",
+      title: "Install the speech model",
+      sub: "One download. After this the app works offline.",
+    },
+    hotkey: {
+      eyebrow: "Step 4 of 6",
+      title: "Pick your shortcut",
+      sub: "Hold to talk, release to transcribe. Esc cancels.",
+    },
+    vocabulary: {
+      eyebrow: "Step 5 of 6",
+      title: "Teach it your words",
+      sub: "Optional. Point at a project folder with a vocabulary file.",
+    },
+    done: {
+      eyebrow: "Step 6 of 6",
+      title: "Try it in Notepad",
+      sub: "Thirty seconds and you're dictating.",
+    },
+  };
 
-      <nav
+  const h = headings[step];
+
+  return (
+    <main
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        padding: "28px 32px 24px",
+      }}
+    >
+      {/* Progress bar */}
+      <div
         style={{
           display: "flex",
           gap: 6,
-          margin: "16px 0 24px",
-          flexWrap: "wrap",
-          fontSize: 12,
+          marginBottom: 36,
         }}
       >
         {ORDER.map((s, i) => (
           <div
             key={s}
             style={{
-              padding: "4px 8px",
-              borderRadius: 4,
-              background: s === step ? "#2d6cdf" : "#eef2f7",
-              color: s === step ? "#fff" : "#555",
-              border: "1px solid " + (s === step ? "#2d6cdf" : "#ddd"),
+              flex: 1,
+              height: 3,
+              borderRadius: 2,
+              background:
+                i < idx
+                  ? "var(--accent)"
+                  : i === idx
+                  ? "var(--accent)"
+                  : "var(--border)",
+              opacity: i === idx ? 1 : i < idx ? 0.5 : 1,
+              transition: "background 0.2s, opacity 0.2s",
             }}
-          >
-            {i + 1}. {LABELS[s]}
-          </div>
+            title={LABELS[s]}
+          />
         ))}
-      </nav>
+      </div>
 
-      {step === "privacy" && (
-        <section>
-          <h2>Privacy</h2>
-          <ul style={{ lineHeight: 1.7 }}>
-            <li>Speech is transcribed <b>locally</b> by whisper.cpp running on this PC.</li>
-            <li>PromptLoom <b>does not require an account</b> and sends no telemetry.</li>
-            <li>
-              <b>Transcripts are not retained</b>. Each dictation is shown
-              briefly in the HUD, pasted (or copied) once, then cleared.
-            </li>
-            <li>
-              <b>Audio behavior, stated precisely:</b> each dictation is
-              written to a scoped <code>.wav</code> file in your system temp
-              directory for whisper to decode, then deleted when
-              transcription returns. Nothing is written on cancel. A built-in
-              privacy audit under Settings can verify this at any time.
-            </li>
-            <li>
-              After the model is installed, <b>no network calls</b> are made.
-              You can disable your network and the app still works.
-            </li>
-          </ul>
-        </section>
-      )}
+      {/* Header */}
+      <div style={{ maxWidth: 560, margin: "0 auto 28px", width: "100%" }}>
+        <div className="pl-section-label" style={{ marginBottom: 8 }}>
+          {h.eyebrow}
+        </div>
+        <h1
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 36,
+            letterSpacing: "-0.02em",
+            margin: "0 0 10px",
+            color: "var(--fg)",
+          }}
+        >
+          {h.title}
+        </h1>
+        <p
+          style={{
+            color: "var(--fg-dim)",
+            fontSize: 14,
+            margin: 0,
+            lineHeight: 1.55,
+          }}
+        >
+          {h.sub}
+        </p>
+      </div>
 
-      {step === "microphone" && (
-        <section>
-          <h2>Microphone</h2>
-          {!mics ? (
-            <p>Looking for input devices…</p>
-          ) : mics.devices.length === 0 ? (
-            <div
-              style={{
-                background: "#fff1f0",
-                border: "1px solid #ffa39e",
-                padding: 12,
-                borderRadius: 6,
-              }}
-            >
-              <b>No input device found.</b>
-              <ol>
-                <li>Plug in or enable a microphone.</li>
-                <li>
-                  Settings → System → Sound → confirm the device is enabled
-                  and Microphone privacy is allowed for desktop apps.
-                </li>
-                <li>Click Refresh.</li>
-              </ol>
-              <button type="button" onClick={refreshMics}>
-                Refresh
-              </button>
-            </div>
-          ) : (
-            <>
-              <p>
-                Pick the microphone PromptLoom should listen on. The level
-                below reacts to your voice in real time.
-              </p>
-              <select
-                value={settings?.mic_device ?? ""}
-                onChange={(e) =>
-                  pickMic(e.target.value === "" ? null : e.target.value)
-                }
-                style={{ padding: 6, minWidth: 320 }}
-              >
-                <option value="">
-                  System default
-                  {mics.default ? ` (${mics.default})` : ""}
-                </option>
-                {mics.devices.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
+      {/* Step content */}
+      <div
+        style={{
+          flex: 1,
+          maxWidth: 560,
+          margin: "0 auto",
+          width: "100%",
+        }}
+        className="pl-stack"
+      >
+        {step === "privacy" && (
+          <div className="pl-card">
+            <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.7 }}>
+              <li>
+                Speech is transcribed <strong style={{ color: "var(--fg)" }}>locally</strong>{" "}
+                by whisper.cpp running on this PC.
+              </li>
+              <li>
+                <strong style={{ color: "var(--fg)" }}>No account, no telemetry.</strong>
+              </li>
+              <li>
+                <strong style={{ color: "var(--fg)" }}>Transcripts are not retained.</strong>{" "}
+                Each one is shown briefly, pasted (or copied) once, then cleared.
+              </li>
+              <li>
+                Each dictation is written to a scoped{" "}
+                <code className="pl-inline">.wav</code> file in your system temp
+                directory for whisper to decode, then deleted when transcription
+                returns. A built-in privacy audit can verify this at any time.
+              </li>
+              <li>
+                After the model is installed,{" "}
+                <strong style={{ color: "var(--fg)" }}>no network calls</strong>{" "}
+                are made.
+              </li>
+            </ul>
+          </div>
+        )}
+
+        {step === "microphone" && (
+          <div className="pl-card">
+            {!mics ? (
+              <div className="pl-muted">Looking for input devices…</div>
+            ) : mics.devices.length === 0 ? (
+              <div className="pl-notice danger">
+                <strong>No input device found.</strong>
+                <ol style={{ margin: "8px 0 0 20px", paddingLeft: 0 }}>
+                  <li>Plug in or enable a microphone.</li>
+                  <li>
+                    Settings → System → Sound → confirm the device is enabled
+                    and Microphone privacy is allowed for desktop apps.
+                  </li>
+                  <li>Click Refresh below.</li>
+                </ol>
+                <button
+                  type="button"
+                  className="pl-btn"
+                  onClick={refreshMics}
+                  style={{ marginTop: 12 }}
+                >
+                  Refresh
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="pl-card-body" style={{ marginBottom: 12 }}>
+                  Pick the microphone PromptLoom should listen on. The bar below
+                  reacts to your voice in real time.
+                </div>
+                <select
+                  className="pl-select"
+                  value={settings?.mic_device ?? ""}
+                  onChange={(e) =>
+                    pickMic(e.target.value === "" ? null : e.target.value)
+                  }
+                  style={{ width: "100%" }}
+                >
+                  <option value="">
+                    System default
+                    {mics.default ? ` (${mics.default})` : ""}
                   </option>
-                ))}
-              </select>
-              <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>
+                  {mics.devices.map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+
+                <div
+                  className="pl-section-label"
+                  style={{ marginTop: 16, marginBottom: 6 }}
+                >
                   Live input level
                 </div>
-                <div
-                  style={{
-                    width: "100%",
-                    height: 20,
-                    background: "#eee",
-                    borderRadius: 4,
-                    overflow: "hidden",
-                  }}
-                >
+                <div className="pl-progress">
                   <div
+                    className="pl-progress-fill"
                     style={{
                       width: `${Math.min(100, probeLevel * 100)}%`,
-                      height: "100%",
                       background:
                         probeLevel > 0.9
-                          ? "#e74c3c"
+                          ? "var(--danger)"
                           : probeLevel > 0.05
-                          ? "#2ecc71"
-                          : "#bbb",
-                      transition: "width 60ms linear",
+                          ? "var(--success)"
+                          : "var(--fg-very-dim)",
                     }}
                   />
                 </div>
-                <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
-                  Speak now to confirm the bar moves. If it stays flat with
-                  everything plugged in, this device isn't picking you up.
+                <div className="pl-dim" style={{ fontSize: 11, marginTop: 6 }}>
+                  Speak to confirm the bar moves.
                 </div>
-              </div>
-            </>
-          )}
-        </section>
-      )}
+              </>
+            )}
+          </div>
+        )}
 
-      {step === "model" && (
-        <section>
-          <h2>Local speech model</h2>
-          {model ? (
-            <div
-              style={{
-                background: "#f8f8fa",
-                border: "1px solid #e4e4e8",
-                padding: 12,
-                borderRadius: 6,
-              }}
-            >
-              <div>
-                <b>{model.name}</b>{" "}
-                <span style={{ color: "#888" }}>
-                  ({(model.size_bytes / 1_000_000).toFixed(1)} MB)
-                </span>
-              </div>
-              <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                License notice:{" "}
-                <a
-                  href="https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  whisper.cpp model license
-                </a>
-              </div>
-              <div style={{ marginTop: 8 }}>
-                Status:{" "}
-                <code>
-                  {model.installed
-                    ? model.verified
-                      ? "installed (SHA-256 verified)"
-                      : "installed — hash MISMATCH; re-download recommended"
-                    : "not installed"}
-                </code>
-              </div>
-              {!model.installed && (
-                <button
-                  type="button"
-                  disabled={downloading}
-                  onClick={() => {
-                    setDownloading(true);
-                    setDownloadError(null);
-                    setProgress({ bytes: 0, total: model.size_bytes });
-                    invoke("download_model_cmd").catch((e) => {
-                      setDownloadError(String(e));
-                      setDownloading(false);
-                    });
-                  }}
-                  style={{ marginTop: 12 }}
-                >
-                  {downloading ? `Downloading… ${pct}%` : "Download now"}
-                </button>
-              )}
-              {downloading && progress && (
-                <div style={{ marginTop: 8 }}>
-                  <div
-                    style={{
-                      width: "100%",
-                      height: 6,
-                      background: "#eee",
-                      borderRadius: 3,
-                      overflow: "hidden",
+        {step === "model" && (
+          <div className="pl-card">
+            {model ? (
+              <>
+                <div className="pl-row between" style={{ marginBottom: 12 }}>
+                  <div>
+                    <div className="pl-card-head" style={{ marginBottom: 2 }}>
+                      {model.name}
+                    </div>
+                    <div className="pl-dim" style={{ fontSize: 12 }}>
+                      {(model.size_bytes / 1_000_000).toFixed(0)} MB
+                    </div>
+                  </div>
+                  {model.installed ? (
+                    model.verified ? (
+                      <span className="pl-pill ok">
+                        <span className="dot" /> SHA-256 verified
+                      </span>
+                    ) : (
+                      <span className="pl-pill err">
+                        <span className="dot" /> hash mismatch
+                      </span>
+                    )
+                  ) : (
+                    <span className="pl-pill warn">
+                      <span className="dot" /> not installed
+                    </span>
+                  )}
+                </div>
+                <div className="pl-card-body" style={{ marginBottom: 12 }}>
+                  License:{" "}
+                  <a
+                    href="https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    whisper.cpp model license
+                  </a>
+                  . Download happens only when you click below — nothing is
+                  fetched automatically.
+                </div>
+
+                {!model.installed && (
+                  <button
+                    type="button"
+                    className="pl-btn primary"
+                    disabled={downloading}
+                    onClick={() => {
+                      setDownloading(true);
+                      setDownloadError(null);
+                      setProgress({ bytes: 0, total: model.size_bytes });
+                      invoke("download_model_cmd").catch((e) => {
+                        setDownloadError(String(e));
+                        setDownloading(false);
+                      });
                     }}
                   >
+                    {downloading ? `Downloading… ${pct}%` : "Download model"}
+                  </button>
+                )}
+
+                {downloading && progress && (
+                  <div style={{ marginTop: 12 }}>
+                    <div className="pl-progress">
+                      <div
+                        className="pl-progress-fill"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
                     <div
-                      style={{
-                        width: `${pct}%`,
-                        height: "100%",
-                        background: "#2ecc71",
-                      }}
-                    />
+                      className="pl-dim pl-mono"
+                      style={{ fontSize: 11, marginTop: 4 }}
+                    >
+                      {(progress.bytes / 1_000_000).toFixed(1)} /{" "}
+                      {(progress.total / 1_000_000).toFixed(1)} MB
+                    </div>
                   </div>
-                  <div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
-                    {(progress.bytes / 1_000_000).toFixed(1)} /{" "}
-                    {(progress.total / 1_000_000).toFixed(1)} MB
+                )}
+
+                {downloadError && (
+                  <div className="pl-notice danger" style={{ marginTop: 12 }}>
+                    <strong>Download failed.</strong> {downloadError}
+                    <div style={{ marginTop: 4, fontSize: 11 }}>
+                      Check your network and click Download model to retry. No
+                      auto-retry.
+                    </div>
                   </div>
-                </div>
-              )}
-              {downloadError && (
+                )}
+
+                {model.installed && model.verified && !model.engine_installed && (
+                  <div className="pl-notice danger" style={{ marginTop: 12 }}>
+                    <strong>Whisper engine missing.</strong> The model is
+                    installed but <code className="pl-inline">whisper-server.exe</code>{" "}
+                    (or <code className="pl-inline">whisper-cli.exe</code>) was
+                    not found next to the model or in a <code className="pl-inline">tools/</code>{" "}
+                    folder. Dictation will fail until you place one there, or
+                    set <code className="pl-inline">PROMPTLOOM_WHISPER_SERVER_BIN</code>{" "}
+                    to its full path.
+                    <div style={{ marginTop: 8 }}>
+                      <button
+                        type="button"
+                        className="pl-btn"
+                        onClick={refreshModel}
+                      >
+                        Re-check
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="pl-muted">Loading model status…</div>
+            )}
+          </div>
+        )}
+
+        {step === "hotkey" && (
+          <div className="pl-card">
+            <div className="pl-card-body" style={{ marginBottom: 12 }}>
+              Hold to talk, release to transcribe. <kbd>Esc</kbd> cancels while
+              holding. Pick the key you want to hold.
+            </div>
+            <div
+              className="pl-btn-group"
+              style={{ gap: 8, flexWrap: "wrap" }}
+            >
+              {hotkeyOptions.map((hk) => (
+                <button
+                  key={hk}
+                  type="button"
+                  className={`pl-btn ${settings?.hotkey === hk ? "active" : ""}`}
+                  onClick={() => pickHotkey(hk)}
+                >
+                  {hk}
+                </button>
+              ))}
+            </div>
+            <div className="pl-dim" style={{ fontSize: 12, marginTop: 10 }}>
+              Current: <kbd>{settings?.hotkey ?? "F8"}</kbd>. Takes effect
+              immediately.
+            </div>
+          </div>
+        )}
+
+        {step === "vocabulary" && (
+          <div className="pl-card">
+            <div className="pl-card-body" style={{ marginBottom: 12 }}>
+              Point PromptLoom at one folder that contains{" "}
+              <code className="pl-inline">.promptloom/terms.yml</code>. It only
+              reads that one file — it does not crawl your project. Corrections
+              are applied after transcription, before paste.
+            </div>
+            {settings?.project_path ? (
+              <>
                 <div
+                  className="pl-mono"
                   style={{
-                    marginTop: 8,
-                    padding: 8,
-                    background: "#fff1f0",
-                    border: "1px solid #ffa39e",
-                    borderRadius: 4,
                     fontSize: 12,
+                    color: "var(--fg)",
+                    wordBreak: "break-all",
+                    padding: "8px 10px",
+                    background: "var(--bg-sunken)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
                   }}
                 >
-                  <b>Download failed.</b> {downloadError}
-                  <div style={{ marginTop: 4, color: "#666" }}>
-                    Check your network and click Download now to retry. We do
-                    not auto-retry.
-                  </div>
+                  {settings.project_path}
                 </div>
-              )}
+                <div className="pl-card-body" style={{ marginTop: 8 }}>
+                  Loaded{" "}
+                  <strong style={{ color: "var(--fg)" }}>
+                    {settings.terms_count}
+                  </strong>{" "}
+                  term{settings.terms_count === 1 ? "" : "s"}.
+                </div>
+                <div className="pl-btn-group" style={{ marginTop: 12 }}>
+                  <button
+                    type="button"
+                    className="pl-btn"
+                    onClick={chooseVocabFolder}
+                  >
+                    Change folder
+                  </button>
+                  <button
+                    type="button"
+                    className="pl-btn"
+                    onClick={clearVocab}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="pl-btn-group">
+                <button
+                  type="button"
+                  className="pl-btn primary"
+                  onClick={chooseVocabFolder}
+                >
+                  Choose folder…
+                </button>
+                <button type="button" className="pl-btn" onClick={next}>
+                  Skip for now
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === "done" && (
+          <div className="pl-card">
+            <ol style={{ margin: 0, paddingLeft: 20, lineHeight: 1.75 }}>
+              <li>
+                Open Notepad (press <kbd>Win</kbd> and type "Notepad").
+              </li>
+              <li>Click into the empty window so it has keyboard focus.</li>
+              <li>
+                Hold <kbd>{settings?.hotkey ?? "F8"}</kbd> and say{" "}
+                <em style={{ color: "var(--fg)" }}>
+                  "the deploy pipeline runs on Tuesday"
+                </em>
+                .
+              </li>
+              <li>Release. The text should appear in Notepad.</li>
+            </ol>
+            <div className="pl-notice" style={{ marginTop: 16 }}>
+              When you've seen it work (or want to skip the demo), click
+              Finish. You can always revisit everything in Settings.
             </div>
-          ) : (
-            <p>Loading model status…</p>
-          )}
-        </section>
-      )}
-
-      {step === "hotkey" && (
-        <section>
-          <h2>Shortcut</h2>
-          <p>
-            <b>Hold to talk, release to transcribe.</b> Press <kbd>Esc</kbd>{" "}
-            while holding to cancel. Pick the key you want to hold.
-          </p>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {hotkeyOptions.map((h) => (
-              <button
-                key={h}
-                type="button"
-                onClick={() => pickHotkey(h)}
-                style={{
-                  padding: "8px 16px",
-                  background: settings?.hotkey === h ? "#2d6cdf" : "#fff",
-                  color: settings?.hotkey === h ? "#fff" : "#333",
-                  border: "1px solid #ccc",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                }}
-              >
-                {h}
-              </button>
-            ))}
-          </div>
-          <div style={{ fontSize: 12, color: "#777", marginTop: 8 }}>
-            Current: <code>{settings?.hotkey ?? "F8"}</code>. The change
-            applies immediately.
-          </div>
-        </section>
-      )}
-
-      {step === "vocabulary" && (
-        <section>
-          <h2>Project vocabulary (optional)</h2>
-          <p>
-            Point PromptLoom at one folder that contains{" "}
-            <code>.promptloom/terms.yml</code>. PromptLoom <b>only</b> reads
-            that one file — it does not crawl your project. Corrections are
-            applied after transcription, before paste.
-          </p>
-          {settings?.project_path ? (
-            <div
-              style={{
-                background: "#f8f8fa",
-                border: "1px solid #e4e4e8",
-                padding: 12,
-                borderRadius: 6,
-              }}
+            <button
+              type="button"
+              className="pl-btn primary"
+              onClick={finish}
+              style={{ marginTop: 14 }}
             >
-              <div
-                style={{
-                  fontFamily: "monospace",
-                  fontSize: 12,
-                  wordBreak: "break-all",
-                }}
-              >
-                {settings.project_path}
-              </div>
-              <div style={{ marginTop: 4, fontSize: 13 }}>
-                Loaded <b>{settings.terms_count}</b> term
-                {settings.terms_count === 1 ? "" : "s"}.
-              </div>
-              <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                <button type="button" onClick={chooseVocabFolder}>
-                  Change folder
-                </button>
-                <button type="button" onClick={clearVocab}>
-                  Skip
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" onClick={chooseVocabFolder}>
-                Choose folder…
-              </button>
-              <button type="button" onClick={next}>
-                Skip for now
-              </button>
-            </div>
-          )}
-        </section>
-      )}
+              Finish setup
+            </button>
+          </div>
+        )}
+      </div>
 
-      {step === "done" && (
-        <section>
-          <h2>Try it in Notepad</h2>
-          <ol style={{ lineHeight: 1.7 }}>
-            <li>
-              Open Notepad (press <kbd>Win</kbd> and type "Notepad").
-            </li>
-            <li>Click into the empty window so it has keyboard focus.</li>
-            <li>
-              Hold <kbd>{settings?.hotkey ?? "F8"}</kbd> and speak clearly:{" "}
-              <i>"the deploy pipeline runs on Tuesday"</i>.
-            </li>
-            <li>Release. The text should appear in Notepad.</li>
-          </ol>
-          <p style={{ color: "#555" }}>
-            When you've seen it work (or if you want to skip and finish
-            anyway), click <b>Finish setup</b>.
-          </p>
-          <button type="button" onClick={finish} style={{ padding: "8px 16px" }}>
-            Finish setup
-          </button>
-        </section>
-      )}
-
-      <nav
+      {/* Footer nav */}
+      <div
         style={{
-          marginTop: 32,
+          maxWidth: 560,
+          margin: "32px auto 0",
+          width: "100%",
           display: "flex",
           justifyContent: "space-between",
-          borderTop: "1px solid #eee",
-          paddingTop: 16,
+          paddingTop: 20,
+          borderTop: "1px solid var(--border)",
         }}
       >
-        <button type="button" onClick={back} disabled={idx === 0}>
+        <button
+          type="button"
+          className="pl-btn"
+          onClick={back}
+          disabled={idx === 0}
+        >
           Back
         </button>
         {step !== "done" && (
           <button
             type="button"
+            className="pl-btn primary"
             onClick={next}
             disabled={!canContinueFrom(step)}
             title={
               canContinueFrom(step)
                 ? undefined
                 : step === "model"
-                ? "Download and verify the model to continue."
+                ? !model?.installed
+                  ? "Download the model to continue."
+                  : !model?.verified
+                  ? "Model hash did not match. Re-download."
+                  : !model?.engine_installed
+                  ? "whisper-server.exe missing — see note above."
+                  : "Download and verify the model to continue."
                 : step === "microphone"
                 ? "At least one input device is required."
                 : undefined
             }
           >
-            Next
+            Continue
           </button>
         )}
-      </nav>
+      </div>
     </main>
   );
 }

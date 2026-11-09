@@ -280,6 +280,56 @@ const COMMANDS: &[Command] = &[
     },
 ];
 
+/// Selection / editing commands dispatched as keystrokes to the active
+/// window instead of pasted as text. Keep this list small on purpose:
+/// a false positive hijacks the user's dictation, which is worse than
+/// missing a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionAction {
+    SelectAll,
+    SelectLastWord,
+    SelectLastLine,
+    DeleteSelection,
+    DeleteLastWord,
+    UndoLast,
+    Redo,
+    CopySelection,
+    CutSelection,
+}
+
+/// Try to interpret `text` as a pure selection/editing command. Matches
+/// only when the ENTIRE utterance (after trimming + lowercasing + strip
+/// of trailing punctuation) is one of the known phrases — never a
+/// substring, which would let "I need to delete that bug" hijack the
+/// delete key.
+pub fn detect_selection_command(text: &str) -> Option<SelectionAction> {
+    let normalized: String = text
+        .trim()
+        .trim_end_matches(['.', '!', '?', ','])
+        .trim()
+        .to_lowercase();
+    match normalized.as_str() {
+        "select all" | "select everything" => Some(SelectionAction::SelectAll),
+        "select last word" | "select previous word" | "select that word" => {
+            Some(SelectionAction::SelectLastWord)
+        }
+        "select last line" | "select current line" | "select this line" => {
+            Some(SelectionAction::SelectLastLine)
+        }
+        "delete that" | "delete selection" | "delete selected" => {
+            Some(SelectionAction::DeleteSelection)
+        }
+        "delete last word" | "delete that word" | "delete previous word" => {
+            Some(SelectionAction::DeleteLastWord)
+        }
+        "undo" | "undo that" | "undo last" | "undo last change" => Some(SelectionAction::UndoLast),
+        "redo" | "redo that" => Some(SelectionAction::Redo),
+        "copy that" | "copy selection" | "copy that text" => Some(SelectionAction::CopySelection),
+        "cut that" | "cut selection" => Some(SelectionAction::CutSelection),
+        _ => None,
+    }
+}
+
 /// Parse the transcript, replacing recognized command phrases with their
 /// literal replacements. Also handles the `all caps … end caps` modifier.
 pub fn apply(text: &str, mode: TranscriptMode) -> String {
@@ -399,6 +449,65 @@ mod tests {
 
     fn normal(text: &str) -> String {
         apply(text, TranscriptMode::Normal)
+    }
+
+    #[test]
+    fn detects_select_all() {
+        assert_eq!(
+            detect_selection_command("select all"),
+            Some(SelectionAction::SelectAll)
+        );
+        assert_eq!(
+            detect_selection_command("Select Everything."),
+            Some(SelectionAction::SelectAll)
+        );
+    }
+
+    #[test]
+    fn detects_delete_variants() {
+        assert_eq!(
+            detect_selection_command("delete that"),
+            Some(SelectionAction::DeleteSelection)
+        );
+        assert_eq!(
+            detect_selection_command("delete last word"),
+            Some(SelectionAction::DeleteLastWord)
+        );
+    }
+
+    #[test]
+    fn detects_undo_redo() {
+        assert_eq!(
+            detect_selection_command("undo"),
+            Some(SelectionAction::UndoLast)
+        );
+        assert_eq!(
+            detect_selection_command("Undo that."),
+            Some(SelectionAction::UndoLast)
+        );
+        assert_eq!(
+            detect_selection_command("redo"),
+            Some(SelectionAction::Redo)
+        );
+    }
+
+    #[test]
+    fn does_not_match_substring() {
+        assert_eq!(
+            detect_selection_command("I need to delete that bug report"),
+            None
+        );
+        assert_eq!(
+            detect_selection_command("select all the items in the list"),
+            None
+        );
+        assert_eq!(detect_selection_command("undo my changes please"), None);
+    }
+
+    #[test]
+    fn empty_input_is_none() {
+        assert_eq!(detect_selection_command(""), None);
+        assert_eq!(detect_selection_command("   "), None);
     }
     fn code(text: &str) -> String {
         apply(text, TranscriptMode::Code)
