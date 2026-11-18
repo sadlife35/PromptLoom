@@ -196,6 +196,76 @@ impl LlamaServer {
         self.polish_with_tone(text, None)
     }
 
+    /// Transform the given text per the named action (formal/casual/
+    /// shorter/fix_grammar). Hard 2s timeout, same as polish — on any
+    /// failure the caller should keep the original text untouched.
+    pub fn transform(&mut self, text: &str, action: &str) -> Result<String, LlamaError> {
+        if text.trim().is_empty() {
+            return Ok(text.to_string());
+        }
+        if !self.is_alive() {
+            return Err(LlamaError::Http("llama-server child has exited".into()));
+        }
+        let directive = match action {
+            "make_formal" => {
+                "Rewrite the following in a formal register. Professional \
+                 tone. No contractions. Preserve meaning. Output only the \
+                 rewritten text."
+            }
+            "make_casual" => {
+                "Rewrite the following in a casual, conversational register. \
+                 Use contractions. Keep it natural. Preserve meaning. Output \
+                 only the rewritten text."
+            }
+            "make_shorter" => {
+                "Rewrite the following to be more concise, cutting any \
+                 redundant words. Keep the meaning. Output only the rewritten \
+                 text."
+            }
+            "fix_grammar" => {
+                "Fix grammar, spelling, and punctuation errors in the \
+                 following. Do not change word choice or meaning otherwise. \
+                 Output only the corrected text."
+            }
+            _ => {
+                return Err(LlamaError::Malformed(format!(
+                    "unknown transform action: {action}"
+                )))
+            }
+        };
+        let agent = ureq::AgentBuilder::new()
+            .timeout(POLISH_REQUEST_TIMEOUT)
+            .build();
+        let url = format!("http://127.0.0.1:{}/completion", self.port);
+        let body = CompletionRequest {
+            prompt: format!("{directive}\n\nInput:\n{text}\n\nOutput:\n"),
+            n_predict: 384,
+            temperature: 0.3,
+            stream: false,
+            stop: ["\n\nInput:", "\n\nOutput:"],
+        };
+        let started = Instant::now();
+        let resp = agent.post(&url).send_json(serde_json::json!(body));
+        match resp {
+            Ok(response) => {
+                let decoded: CompletionResponse = response
+                    .into_json()
+                    .map_err(|e| LlamaError::Malformed(e.to_string()))?;
+                Ok(decoded.content.trim().to_string())
+            }
+            Err(e) => {
+                let elapsed = started.elapsed();
+                if elapsed >= POLISH_REQUEST_TIMEOUT {
+                    Err(LlamaError::Timeout {
+                        ms: elapsed.as_millis() as u64,
+                    })
+                } else {
+                    Err(LlamaError::Http(e.to_string()))
+                }
+            }
+        }
+    }
+
     /// Polish with an optional tone override. Tone values other than
     /// "casual" / "formal" are ignored (falls back to neutral prompt).
     pub fn polish_with_tone(
@@ -285,6 +355,17 @@ pub fn resolve_llama_binary(model_path: &Path) -> Option<PathBuf> {
         let p = PathBuf::from(env);
         if p.exists() {
             return Some(p);
+        }
+    }
+    // Bundled: next to the application exe (where Tauri drops externalBin).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in &["llama-server.exe", "llama-server"] {
+                let p = dir.join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
         }
     }
     if let Some(parent) = model_path.parent() {

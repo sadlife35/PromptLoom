@@ -70,5 +70,5 @@ full behavior and known limitations as of 0.1.0.
 - Built-in privacy audit
 - Signed NSIS installer
 
-[Unreleased]: https://github.com/[OWNER]/promptloom/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/[OWNER]/promptloom/releases/tag/v0.1.0
+[Unreleased]: https://github.com/sadlife35/promptloom/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sadlife35/promptloom/releases/tag/v0.1.0

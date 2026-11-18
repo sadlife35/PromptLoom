@@ -109,21 +109,23 @@ in `apps/desktop/src-tauri/tauri.conf.json`.
 
 ### Bundle whisper-server.exe with installer
 
-Current flow expects `whisper-server.exe` next to the model or in a
-`tools/` folder. For v0.1 ship, two options:
+`resolve_engine_path()` and `resolve_llama_binary()` now look next to the
+application `.exe` first, which is where Tauri `externalBin` drops
+bundled binaries. To actually bundle them:
 
-- **A.** Bundle via Tauri `externalBin` — rename the binary to
-  `whisper-server-x86_64-pc-windows-msvc.exe`, put it under
-  `apps/desktop/src-tauri/binaries/`, add
-  `"externalBin": ["binaries/whisper-server"]` to the bundle config.
-  Also update `resolve_engine_path()` to check Tauri's resource dir.
-- **B.** Download on first run — add a second download step to onboarding
-  that fetches `whisper-server.exe` from the whisper.cpp releases page,
-  SHA-verifies, stores alongside models. Keeps installer small.
+1. Rename the binaries to Tauri's platform-triple scheme and place under
+   `apps/desktop/src-tauri/binaries/`:
+   - `whisper-server-x86_64-pc-windows-msvc.exe`
+   - `llama-server-x86_64-pc-windows-msvc.exe`
+2. Add to `apps/desktop/src-tauri/tauri.conf.json` under `bundle`:
+   ```json
+   "externalBin": ["binaries/whisper-server", "binaries/llama-server"]
+   ```
+3. Rebuild. The installer now contains both binaries, and they land next
+   to the app's `.exe` — `resolve_*` picks them up without env vars.
 
-**Recommended**: **A** (bundle). Users already accept a 466 MB model
-download; a 5 MB binary bundled in the 30 MB installer is a non-issue
-and removes a failure mode.
+Not wired by default because the binaries aren't tracked in git. Add
+them via your release CI, or drop them in locally before building.
 
 ---
 

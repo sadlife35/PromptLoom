@@ -2,6 +2,8 @@
 
 mod context;
 mod foreground;
+mod insights;
+mod notetaker;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,12 +13,15 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use promptloom_asr::download::{download_model, verify_file};
-use promptloom_asr::{find_model, load_all_manifest, load_manifest, WhisperTranscriber};
+use promptloom_asr::{
+    find_model, load_all_manifest, load_manifest, ModelManifest, WhisperTranscriber,
+};
 use promptloom_audio::{
     default_input_device_name, enumerate_input_devices, LevelMeter, MicProbe, WasapiAudioSource,
 };
 use promptloom_commands::{
-    apply as apply_commands, detect_selection_command, SelectionAction, TranscriptMode,
+    apply as apply_commands, detect_selection_command, detect_transform, SelectionAction,
+    TranscriptMode,
 };
 use promptloom_core::TextTransformer;
 use promptloom_core::{
@@ -77,8 +82,50 @@ struct ClipboardAndHudSink {
     app: AppHandle,
 }
 
+fn maybe_record_insights(app: &AppHandle, text: &str) {
+    let state = app.state::<AppState>();
+    if !state.settings.lock().insights_enabled {
+        return;
+    }
+    let started = state.recording_start.lock().take();
+    let duration_ms = started.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0);
+    let app_name = state.recording_app.lock().clone();
+
+    let parsed = insights::parse_stats(text);
+    let record = insights::SessionRecord {
+        ts: insights::now_unix(),
+        word_count: parsed.word_count,
+        duration_ms,
+        filler_count: parsed.filler_count,
+        app: app_name,
+    };
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
+    if let Err(e) = insights::record_session(&data_dir, &record, &parsed.words_for_frequency) {
+        tracing::warn!(?e, "failed to record insights session");
+    }
+}
+
+/// Maximum chars we'll replace during a transform. Longer than this and
+/// the Shift+Left N spam becomes noticeable; the user is better served by
+/// re-dictating. We tell them so via a notice.
+const TRANSFORM_MAX_CHARS: usize = 1200;
+
 impl OutputSink for ClipboardAndHudSink {
     fn deliver(&mut self, text: &str, target: &TargetWindow) -> DeliveryOutcome {
+        // Transform commands ("make that formal", etc.) rewrite the PREVIOUS
+        // delivery in place. Checked before selection so they take
+        // precedence over a stray "delete that" hiding inside a transform.
+        if let Some(action) = detect_transform(text) {
+            if let Some(outcome) = self.try_transform(action, target) {
+                return outcome;
+            }
+            // Fallthrough: either transforms disabled, no previous text,
+            // or polish unavailable. We treat the utterance as plain text
+            // below — it just reads as prose if it lands in the window.
+        }
         // Selection commands dispatch keystrokes to the target window
         // instead of pasting the recognized text. The target-identity
         // check still applies — we only send keys if the foreground still
@@ -117,8 +164,115 @@ impl OutputSink for ClipboardAndHudSink {
             "delivering transcript via clipboard + Ctrl+V"
         );
         let _ = self.app.emit("promptloom:transcript", text);
-        self.inner.deliver(text, target)
+        maybe_record_insights(&self.app, text);
+        let outcome = self.inner.deliver(text, target);
+        // Track the last successful paste so transforms can target it. We
+        // intentionally skip storage for selection commands and
+        // transform-triggered replacements (handled in their own paths).
+        if matches!(outcome, DeliveryOutcome::Pasted) {
+            let state = self.app.state::<AppState>();
+            *state.last_delivered.lock() = Some(text.to_string());
+        }
+        outcome
     }
+}
+
+impl ClipboardAndHudSink {
+    /// Try to apply a transform to the previously delivered text. Returns
+    /// `Some` when the transform ran (one way or another — paste, copy-only,
+    /// or explicit error notice). `None` means "fall through to normal
+    /// delivery" because the preconditions weren't met.
+    fn try_transform(
+        &mut self,
+        action: promptloom_commands::TransformAction,
+        target: &TargetWindow,
+    ) -> Option<DeliveryOutcome> {
+        let state = self.app.state::<AppState>();
+        if !state.settings.lock().transforms_enabled {
+            return None;
+        }
+        let Some(previous) = state.last_delivered.lock().clone() else {
+            let _ = self.app.emit(
+                "promptloom:notice",
+                "transform needs a previous dictation to act on",
+            );
+            return None;
+        };
+        if previous.chars().count() > TRANSFORM_MAX_CHARS {
+            let _ = self.app.emit(
+                "promptloom:notice",
+                "previous dictation too long to transform — please re-dictate",
+            );
+            return Some(DeliveryOutcome::CopyOnly {
+                reason: "previous text too long to transform",
+            });
+        }
+        // Target-identity check — never inject if focus moved.
+        if !promptloom_output_windows::should_paste(
+            target,
+            foreground::capture_foreground().as_ref(),
+        ) {
+            return Some(DeliveryOutcome::CopyOnly {
+                reason: "focus changed since recording started",
+            });
+        }
+        // Run the transform via the bundled llama sidecar.
+        let action_name = match action {
+            promptloom_commands::TransformAction::MakeFormal => "make_formal",
+            promptloom_commands::TransformAction::MakeCasual => "make_casual",
+            promptloom_commands::TransformAction::MakeShorter => "make_shorter",
+            promptloom_commands::TransformAction::FixGrammar => "fix_grammar",
+        };
+        let rewritten = {
+            let mut slot = state.bundled_llama.lock();
+            let Some(server) = slot.as_mut() else {
+                let _ = self.app.emit(
+                    "promptloom:notice",
+                    "bundled polish not ready — transform skipped",
+                );
+                return None;
+            };
+            match server.transform(&previous, action_name) {
+                Ok(t) if !t.trim().is_empty() => t,
+                Ok(_) | Err(_) => {
+                    let _ = self.app.emit(
+                        "promptloom:notice",
+                        "transform failed — previous text unchanged",
+                    );
+                    return Some(DeliveryOutcome::Failed);
+                }
+            }
+        };
+        // Select the previous paste: Shift+Left `previous.chars().count()` times.
+        // Then paste the rewritten text to overwrite it.
+        let char_count = previous.chars().count();
+        if let Err(e) = select_left(char_count) {
+            tracing::warn!(?e, "select-left failed during transform");
+            let _ = self
+                .app
+                .emit("promptloom:notice", "transform keystroke failed");
+            return Some(DeliveryOutcome::Failed);
+        }
+        let outcome = self.inner.deliver(&rewritten, target);
+        if matches!(outcome, DeliveryOutcome::Pasted) {
+            *state.last_delivered.lock() = Some(rewritten.clone());
+            let _ = self.app.emit("promptloom:transcript", &rewritten);
+            let _ = self
+                .app
+                .emit("promptloom:notice", format!("transformed: {action_name}"));
+        }
+        Some(outcome)
+    }
+}
+
+fn select_left(n: usize) -> Result<(), String> {
+    use promptloom_output_windows::paste::{keys, send_combo, Mods};
+    // Cap at a sane upper bound in case we miscount graphemes.
+    let n = n.min(TRANSFORM_MAX_CHARS);
+    for _ in 0..n {
+        send_combo(keys::SELECT_LEFT, Mods::SHIFT).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Translate one `SelectionAction` into a `SendInput` sequence sent to
@@ -192,7 +346,46 @@ struct PolishedVocabulary {
     /// before dispatch based on the foreground exe's profile. `None` for
     /// neutral default.
     tone_override: Arc<Mutex<Option<String>>>,
+    /// Shared snippets store (trigger → body). Looked up for phrases of
+    /// the form `insert <name>` which expand in-place before polish.
+    snippets: Arc<Mutex<BTreeMap<String, String>>>,
     app: AppHandle,
+}
+
+/// Replace `insert <name>` phrases (case-insensitive, word-boundaried,
+/// single-word triggers) with the snippet's body. Unknown names pass
+/// through unchanged.
+fn expand_snippets(text: &str, snippets: &BTreeMap<String, String>) -> String {
+    if snippets.is_empty() {
+        return text.to_string();
+    }
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+        if at_boundary && lower.as_bytes().get(i..i + 7) == Some(b"insert ") {
+            let token_start = i + 7;
+            let mut j = token_start;
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'-')
+            {
+                j += 1;
+            }
+            if j > token_start {
+                let token = &lower[token_start..j];
+                if let Some(body) = snippets.get(token) {
+                    out.push_str(body);
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 impl TextTransformer for PolishedVocabulary {
@@ -204,6 +397,13 @@ impl TextTransformer for PolishedVocabulary {
         if detect_selection_command(text).is_some() {
             return text.trim().to_string();
         }
+        // Snippet expansion: `insert <name>` → body. Runs before polish so
+        // the inserted text goes through the same vocab + polish pipeline.
+        let text = {
+            let snippets = self.snippets.lock();
+            expand_snippets(text, &snippets)
+        };
+        let text = text.as_str();
         let mode = *self.mode.lock();
         let after_commands = apply_commands(text, mode);
         let polished = self.polisher.polish(&after_commands);
@@ -228,7 +428,25 @@ impl TextTransformer for PolishedVocabulary {
             let mut slot = self.bundled_llama.lock();
             if let Some(server) = slot.as_mut() {
                 match server.polish_with_tone(&after_vocab, tone.as_deref()) {
-                    Ok(cleaned) if !cleaned.trim().is_empty() => return cleaned,
+                    Ok(cleaned) if !cleaned.trim().is_empty() => {
+                        // Optional auto-transform pass (Formal / Casual /
+                        // Shorter / Fix grammar). Set via Transforms page.
+                        let auto = self
+                            .app
+                            .state::<AppState>()
+                            .settings
+                            .lock()
+                            .auto_transform
+                            .clone();
+                        if let Some(action) = auto.as_deref() {
+                            if let Ok(transformed) = server.transform(&cleaned, action) {
+                                if !transformed.trim().is_empty() {
+                                    return transformed;
+                                }
+                            }
+                        }
+                        return cleaned;
+                    }
                     Ok(_) => {
                         tracing::debug!("bundled polish returned empty; falling through");
                     }
@@ -303,6 +521,22 @@ struct AppState {
     /// Managed `llama-server` sidecar for bundled transcript polish.
     /// `None` until startup completes (first dictation may skip polish).
     bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
+    /// Live snippets store (trigger name → body). Mutated by the Snippets
+    /// UI and consulted during polish to expand `"insert <name>"` phrases
+    /// into their full body before paste. Persisted to disk.
+    snippets: Arc<Mutex<BTreeMap<String, String>>>,
+    /// When the in-progress dictation started. Set on HotkeyPressed, read
+    /// by the sink on delivery so Insights can compute WPM.
+    recording_start: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Foreground app for the in-progress dictation (lowercased basename).
+    recording_app: Arc<Mutex<String>>,
+    /// Long-form meeting recorder. Owns its own whisper + audio; runs
+    /// independently of the hold-to-talk orchestrator.
+    notetaker: Arc<notetaker::Notetaker>,
+    /// Text of the last successful delivery, available for in-place
+    /// transforms ("make that formal", "fix grammar"). `None` after any
+    /// delivery that isn't eligible, cleared after a transform runs.
+    last_delivered: Arc<Mutex<Option<String>>>,
     /// Tone override written by the worker before each dictation based on
     /// the foreground executable's profile. `PolishedVocabulary` reads
     /// this during polish. `None` means neutral default.
@@ -316,6 +550,7 @@ struct AppState {
     level: LevelMeter,
     model_dir: PathBuf,
     manifest_path: PathBuf,
+    polish_manifest_path: PathBuf,
     settings_path: PathBuf,
     settings: Mutex<Settings>,
     scratch_dir: PathBuf,
@@ -365,6 +600,28 @@ struct Settings {
     /// Code/Terminal built-in modes still win over this when they match.
     #[serde(default)]
     app_profiles: BTreeMap<String, String>,
+    /// When true, aggregate stats about each dictation (word count, filler
+    /// count, duration, top words with length ≥4) are recorded to disk so
+    /// the Insights page can show trends. Off by default — the onboarding
+    /// privacy promise is "no transcripts retained", and this toggle makes
+    /// that commitment explicit even for aggregates.
+    #[serde(default)]
+    insights_enabled: bool,
+    /// When true, mid-dictation phrases like "make that formal" are
+    /// detected and rewrite the previous paste via the bundled polish
+    /// model. Requires bundled polish to be installed and running.
+    #[serde(default = "default_true")]
+    transforms_enabled: bool,
+    /// When Some, every dictation also runs this transform automatically
+    /// on the polished text before delivery. Valid values match the
+    /// `TransformAction` snake_case variants: "make_formal", "make_casual",
+    /// "make_shorter", "fix_grammar". None = no auto transform.
+    #[serde(default)]
+    auto_transform: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 const ALLOWED_TONES: &[&str] = &["casual", "formal"];
@@ -400,9 +657,10 @@ fn parse_transcript_mode(s: &str) -> TranscriptMode {
 }
 
 fn default_active_model() -> String {
-    // New installs default to small.en (best quality-to-size trade for most
-    // users). Existing installs keep whatever is already in settings.json.
-    "ggml-small.en".to_string()
+    // New installs default to large-v3-turbo-q5_0 — closest open-source
+    // match to commercial dictation quality, ~574 MB, roughly realtime on
+    // a modern CPU. Existing installs keep whatever is in settings.json.
+    "ggml-large-v3-turbo-q5_0".to_string()
 }
 
 fn default_hotkey() -> String {
@@ -415,7 +673,7 @@ fn default_dictation_mode() -> String {
 
 /// The small safe set of hotkey options A1 allows. Keeps us well clear of
 /// arbitrary shortcut capture, per the plan.
-const ALLOWED_HOTKEYS: &[&str] = &["F8", "F9", "F10", "F2"];
+const ALLOWED_HOTKEYS: &[&str] = &["F8", "F9", "F10", "F2", "CapsLock"];
 
 /// Dictation modes offered in A3. Keep this set small on purpose.
 const ALLOWED_MODES: &[&str] = &["hold", "toggle"];
@@ -425,6 +683,7 @@ fn hotkey_code(name: &str) -> Code {
         "F9" => Code::F9,
         "F10" => Code::F10,
         "F2" => Code::F2,
+        "CapsLock" => Code::CapsLock,
         _ => Code::F8,
     }
 }
@@ -500,6 +759,46 @@ fn read_terms_file(path: &Path) -> BTreeMap<String, String> {
             BTreeMap::new()
         }
     }
+}
+
+fn resolve_snippets_write_path(app: &AppHandle) -> std::io::Result<PathBuf> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+    std::fs::create_dir_all(&data_dir)?;
+    Ok(data_dir.join("snippets.yml"))
+}
+
+fn read_snippets_file(path: &Path) -> BTreeMap<String, String> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    #[derive(serde::Deserialize)]
+    struct SnippetsFile {
+        #[serde(default)]
+        snippets: BTreeMap<String, String>,
+    }
+    match serde_yaml::from_slice::<SnippetsFile>(&bytes) {
+        Ok(sf) => sf.snippets,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), ?e, "snippets.yml parse failed; using empty");
+            BTreeMap::new()
+        }
+    }
+}
+
+fn write_snippets_file(path: &Path, snippets: &BTreeMap<String, String>) -> std::io::Result<()> {
+    #[derive(serde::Serialize)]
+    struct SnippetsFile<'a> {
+        snippets: &'a BTreeMap<String, String>,
+    }
+    let out = serde_yaml::to_string(&SnippetsFile { snippets })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, out)
 }
 
 /// Serialize the term map to the same YAML schema `promptloom-vocabulary`
@@ -855,6 +1154,19 @@ fn resolve_engine_path(model_dir: &std::path::Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // Bundled binaries that ship with the installer land next to the
+    // main .exe. Check that directory first so release installs just work
+    // without any env vars or dev-only path lookups.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in &["whisper-server.exe", "whisper-cli.exe"] {
+                let p = dir.join(name);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
     for name in &[
         "whisper-server.exe",
         "whisper-cli.exe",
@@ -1112,6 +1424,96 @@ fn download_model_cmd(app: AppHandle, state: tauri::State<'_, AppState>) -> Resu
                 tracing::warn!(?e, "model download failed");
                 let _ = app.emit("promptloom:notice", format!("download failed: {e}"));
                 let _ = app.emit("promptloom:download-done", false);
+            }
+        }
+    });
+    Ok(())
+}
+
+#[derive(Serialize, Clone)]
+struct PolishModelSummary {
+    name: String,
+    size_bytes: u64,
+    note: Option<String>,
+    installed: bool,
+    is_default: bool,
+}
+
+fn polish_dest_path(model_dir: &std::path::Path, manifest: &ModelManifest) -> PathBuf {
+    let filename = manifest
+        .filename
+        .clone()
+        .unwrap_or_else(|| format!("{}.gguf", manifest.name));
+    model_dir.join("polish").join(filename)
+}
+
+#[tauri::command]
+fn list_polish_models(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PolishModelSummary>, String> {
+    let manifests = load_all_manifest(&state.polish_manifest_path).map_err(|e| e.to_string())?;
+    Ok(manifests
+        .into_iter()
+        .map(|m| {
+            let path = polish_dest_path(&state.model_dir, &m);
+            let installed = path.exists();
+            PolishModelSummary {
+                installed,
+                is_default: m.default,
+                name: m.name,
+                size_bytes: m.size_bytes,
+                note: m.note,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn download_polish_model_cmd(
+    name: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let manifest = find_model(&state.polish_manifest_path, &name).map_err(|e| e.to_string())?;
+    let dest = polish_dest_path(&state.model_dir, &manifest);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let app_for_thread = app.clone();
+    let manifest_name = manifest.name.clone();
+    let state_arc = Arc::new((manifest, dest));
+    let state_for_thread = state_arc.clone();
+
+    std::thread::spawn(move || {
+        let (manifest, dest) = (&state_for_thread.0, &state_for_thread.1);
+        let app = app_for_thread;
+        let result = download_model(manifest, dest, |bytes, total| {
+            let _ = app.emit(
+                "promptloom:polish-download",
+                DownloadProgress { bytes, total },
+            );
+        });
+        match result {
+            Ok(_) => {
+                tracing::info!(name = %manifest_name, "polish model downloaded");
+                let _ = app.emit("promptloom:polish-download-done", true);
+                // Persist choice + restart the llama-server with the new weights.
+                let app_state = app.state::<AppState>();
+                {
+                    let mut settings = app_state.settings.lock();
+                    settings.bundled_polish_model = Some(manifest_name.clone());
+                    let _ = save_settings(&app_state.settings_path, &settings);
+                }
+                let model_dir = app_state.model_dir.clone();
+                let slot = app_state.bundled_llama.clone();
+                *slot.lock() = None; // drop old child so port is released
+                start_llama_server_async(app.clone(), slot, Some(manifest_name), &model_dir);
+            }
+            Err(e) => {
+                tracing::warn!(?e, "polish model download failed");
+                let _ = app.emit("promptloom:notice", format!("polish download failed: {e}"));
+                let _ = app.emit("promptloom:polish-download-done", false);
             }
         }
     });
@@ -1425,6 +1827,7 @@ fn init_orchestrator(
     llm_config: Arc<Mutex<LlmConfig>>,
     bundled_llama: Arc<Mutex<Option<LlamaServer>>>,
     tone_override: Arc<Mutex<Option<String>>>,
+    snippets: Arc<Mutex<BTreeMap<String, String>>>,
 ) -> Result<(Orch, LevelMeter), PromptLoomError> {
     let audio = WasapiAudioSource::new_with_device(mic_device)?;
     let level = audio.level_meter();
@@ -1457,6 +1860,7 @@ fn init_orchestrator(
         bundled_llama,
         ollama: OllamaClient::default(),
         tone_override,
+        snippets,
         app: app.clone(),
     };
     let orch = Orchestrator::new(audio, transcriber, text_transformer, sink);
@@ -1645,6 +2049,194 @@ fn set_bundled_polish_enabled(
 }
 
 #[tauri::command]
+fn notetaker_start(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let model_path = {
+        let active = state.settings.lock().active_model.clone();
+        let manifest = find_model(&state.manifest_path, &active).map_err(|e| e.to_string())?;
+        state.model_dir.join(format!("{}.bin", manifest.name))
+    };
+    if !model_path.exists() {
+        return Err("whisper model not installed — download one from Settings first".into());
+    }
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
+    let mic = state.settings.lock().mic_device.clone();
+    let path = state
+        .notetaker
+        .start(app.clone(), model_path, data_dir, mic)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn notetaker_stop(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    Ok(state
+        .notetaker
+        .stop(&app)?
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn notetaker_status(state: tauri::State<'_, AppState>) -> notetaker::NotetakerStatus {
+    state.notetaker.status()
+}
+
+#[tauri::command]
+fn notetaker_list_meetings(app: AppHandle) -> Vec<notetaker::MeetingSummary> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
+    notetaker::list_meetings(&data_dir)
+}
+
+#[tauri::command]
+fn notetaker_read_meeting(path: String) -> Result<String, String> {
+    notetaker::read_meeting(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn notetaker_summarize_meeting(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let body = notetaker::read_meeting(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    // Strip the markdown header and the `(ended)` marker so the LLM gets
+    // transcript text only.
+    let text: String = body
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with('_'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return Err("meeting transcript is empty — nothing to summarize".into());
+    }
+    let mut slot = state.bundled_llama.lock();
+    let Some(server) = slot.as_mut() else {
+        return Err("bundled polish not running — install a polish model to summarize".into());
+    };
+    // Reuse the transform channel with a summarize-style directive.
+    server
+        .transform(&text, "make_shorter")
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_auto_transform(
+    action: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Settings, String> {
+    if let Some(a) = &action {
+        const OK: &[&str] = &["make_formal", "make_casual", "make_shorter", "fix_grammar"];
+        if !OK.contains(&a.as_str()) {
+            return Err(format!("unknown transform: {a}"));
+        }
+    }
+    let mut settings = state.settings.lock();
+    settings.auto_transform = action;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn set_transforms_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.transforms_enabled = enabled;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn insights_summary(app: AppHandle) -> insights::InsightsSummary {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
+    insights::summarize(&data_dir)
+}
+
+#[tauri::command]
+fn set_insights_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<Settings, String> {
+    let mut settings = state.settings.lock();
+    settings.insights_enabled = enabled;
+    save_settings(&state.settings_path, &settings).map_err(|e| e.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn clear_insights(app: AppHandle) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
+    insights::clear(&data_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_snippets(state: tauri::State<'_, AppState>) -> Vec<(String, String)> {
+    state
+        .snippets
+        .lock()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+#[tauri::command]
+fn add_snippet(
+    name: String,
+    body: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    let key = name.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return Err("name is required".into());
+    }
+    if key.contains(' ') {
+        return Err("name must be a single word (letters, digits, _ or -)".into());
+    }
+    if body.trim().is_empty() {
+        return Err("body is required".into());
+    }
+    let snapshot = {
+        let mut snippets = state.snippets.lock();
+        snippets.insert(key, body);
+        snippets.clone()
+    };
+    let path = resolve_snippets_write_path(&app).map_err(|e| e.to_string())?;
+    write_snippets_file(&path, &snapshot).map_err(|e| e.to_string())?;
+    Ok(snapshot.into_iter().collect())
+}
+
+#[tauri::command]
+fn remove_snippet(
+    name: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    let key = name.trim().to_ascii_lowercase();
+    let snapshot = {
+        let mut snippets = state.snippets.lock();
+        snippets.remove(&key);
+        snippets.clone()
+    };
+    let path = resolve_snippets_write_path(&app).map_err(|e| e.to_string())?;
+    write_snippets_file(&path, &snapshot).map_err(|e| e.to_string())?;
+    Ok(snapshot.into_iter().collect())
+}
+
+#[tauri::command]
 fn list_app_profiles(state: tauri::State<'_, AppState>) -> Result<Vec<(String, String)>, String> {
     let settings = state.settings.lock();
     Ok(settings
@@ -1777,6 +2369,13 @@ fn spawn_orchestrator_worker(
                         WorkerCmd::HotkeyPressed(target) => {
                             last_partial = None;
                             last_snapshot_time = std::time::Instant::now();
+
+                            // Stamp recording start + app for Insights.
+                            {
+                                let app_state = app.state::<AppState>();
+                                *app_state.recording_start.lock() = Some(std::time::Instant::now());
+                                *app_state.recording_app.lock() = normalize_exe(&target.executable);
+                            }
 
                             // Context-aware mode: if auto_context is on and
                             // we recognize the foreground app, override the
@@ -1936,20 +2535,59 @@ fn resolve_paths(app: &AppHandle) -> (PathBuf, PathBuf) {
         .app_data_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"));
     let model_dir = data_dir.join("models");
-    // Prefer the repo-local manifest in dev; fall back to resource dir in release.
-    let manifest_path = std::env::current_dir()
+    // Prefer the repo-local manifest in dev; fall back to the bundled resource in release.
+    let dev_candidate = std::env::current_dir()
         .ok()
-        .and_then(|cwd| {
-            // apps/desktop/src-tauri -> repo root
-            let candidate = cwd.join("../../../models/manifest.json");
-            if candidate.exists() {
-                Some(candidate)
-            } else {
-                None
-            }
-        })
+        .map(|cwd| cwd.join("../../../models/manifest.json"))
+        .filter(|p| p.exists());
+    let resource_candidate = app.path().resource_dir().ok().and_then(|r| {
+        let a = r.join("models").join("manifest.json");
+        if a.exists() {
+            return Some(a);
+        }
+        let b = r.join("manifest.json");
+        if b.exists() {
+            return Some(b);
+        }
+        let c = r
+            .join("_up_")
+            .join("_up_")
+            .join("_up_")
+            .join("models")
+            .join("manifest.json");
+        if c.exists() {
+            return Some(c);
+        }
+        None
+    });
+    let manifest_path = dev_candidate
+        .or(resource_candidate)
         .unwrap_or_else(|| data_dir.join("manifest.json"));
     (model_dir, manifest_path)
+}
+
+fn resolve_polish_manifest_path(app: &AppHandle) -> PathBuf {
+    let dev_candidate = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join("../../../models/polish-manifest.json"))
+        .filter(|p| p.exists());
+    let resource_candidate = app.path().resource_dir().ok().and_then(|r| {
+        let a = r.join("models").join("polish-manifest.json");
+        if a.exists() {
+            return Some(a);
+        }
+        let b = r.join("polish-manifest.json");
+        if b.exists() {
+            return Some(b);
+        }
+        None
+    });
+    dev_candidate.or(resource_candidate).unwrap_or_else(|| {
+        app.path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("PromptLoom"))
+            .join("polish-manifest.json")
+    })
 }
 
 fn resolve_model_path(
@@ -1985,6 +2623,12 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        // Auto-updater is scaffolded in tauri.conf.json plugins block (currently
+        // empty). To enable: add `tauri-plugin-updater = "2"` back to Cargo.toml,
+        // generate a keypair with `cargo tauri signer generate`, set the pubkey
+        // in tauri.conf.json, then add:
+        //   .plugin(tauri_plugin_updater::Builder::new().build())
+        // Registering the plugin with an empty pubkey panics and stalls IPC.
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -2036,12 +2680,29 @@ fn main() {
             list_app_profiles,
             set_app_profile,
             remove_app_profile,
+            list_polish_models,
+            download_polish_model_cmd,
+            list_snippets,
+            add_snippet,
+            remove_snippet,
+            insights_summary,
+            set_insights_enabled,
+            clear_insights,
+            set_transforms_enabled,
+            set_auto_transform,
+            notetaker_start,
+            notetaker_stop,
+            notetaker_status,
+            notetaker_list_meetings,
+            notetaker_read_meeting,
+            notetaker_summarize_meeting,
             list_vocab_terms,
             add_vocab_term,
             remove_vocab_term,
         ])
         .setup(|app| {
             let (model_dir, manifest_path) = resolve_paths(app.handle());
+            let polish_manifest_path = resolve_polish_manifest_path(app.handle());
             let settings_path = app
                 .path()
                 .app_data_dir()
@@ -2081,6 +2742,16 @@ fn main() {
                 &model_dir,
             );
             let tone_override: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let snippets_path = resolve_snippets_write_path(app.handle()).ok();
+            let snippets_map = snippets_path
+                .as_deref()
+                .map(read_snippets_file)
+                .unwrap_or_default();
+            let snippets: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(snippets_map));
+            let recording_start: Arc<Mutex<Option<std::time::Instant>>> =
+                Arc::new(Mutex::new(None));
+            let recording_app: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+            let last_delivered: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
             let (orch_opt, level) = match init_orchestrator(
                 app.handle(),
                 model_path.as_deref(),
@@ -2090,6 +2761,7 @@ fn main() {
                 llm_config.clone(),
                 bundled_llama.clone(),
                 tone_override.clone(),
+                snippets.clone(),
             ) {
                 Ok(ol) => (Some(ol.0), Some(ol.1)),
                 Err(e) => {
@@ -2128,10 +2800,16 @@ fn main() {
                 whisper_health,
                 bundled_llama,
                 tone_override,
+                snippets,
+                recording_start: recording_start.clone(),
+                recording_app: recording_app.clone(),
+                notetaker: Arc::new(notetaker::Notetaker::default()),
+                last_delivered: last_delivered.clone(),
                 vocab_terms,
                 level: level.clone(),
                 model_dir,
                 manifest_path,
+                polish_manifest_path,
                 settings_path,
                 settings: Mutex::new(settings),
                 scratch_dir,

@@ -126,6 +126,8 @@ mod tests {
             license_url: "x".into(),
             size_bytes: 11,
             note: None,
+            filename: None,
+            default: false,
         };
         assert!(verify_file(&m, tmp.path()).is_ok());
     }
@@ -142,6 +144,8 @@ mod tests {
             license_url: "x".into(),
             size_bytes: 4,
             note: None,
+            filename: None,
+            default: false,
         };
         assert!(matches!(
             verify_file(&m, tmp.path()),

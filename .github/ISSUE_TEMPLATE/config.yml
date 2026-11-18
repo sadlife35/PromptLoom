@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/[OWNER]/promptloom/security/policy
+    url: https://github.com/sadlife35/promptloom/security/policy
     about: Please report security issues privately via SECURITY.md — not here.
   - name: Discussions
-    url: https://github.com/[OWNER]/promptloom/discussions
+    url: https://github.com/sadlife35/promptloom/discussions
     about: General questions, "should we do X" conversations, show-and-tell.

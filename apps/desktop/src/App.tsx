@@ -32,6 +32,27 @@ type Settings = {
   auto_context: boolean;
   bundled_polish_enabled: boolean;
   bundled_polish_model: string | null;
+  insights_enabled: boolean;
+  transforms_enabled: boolean;
+  auto_transform: string | null;
+};
+
+type SessionRecord = {
+  ts: number;
+  word_count: number;
+  duration_ms: number;
+  filler_count: number;
+  app: string;
+};
+
+type InsightsSummary = {
+  total_sessions: number;
+  total_words: number;
+  total_duration_ms: number;
+  avg_wpm: number;
+  filler_rate: number;
+  top_words: [string, number][];
+  recent: SessionRecord[];
 };
 
 type LlamaHealth =
@@ -367,64 +388,13 @@ export function App() {
             setOnboardingNeeded={setOnboardingNeeded}
           />
         )}
-        {section === "insights" && (
-          <div className="pl-stub">
-            <h2>Insights</h2>
-            <p>
-              Your voice profile, pacing, pauses, and most-used words will
-              surface here. Not yet shipped. Built from local dictation only —
-              nothing leaves your PC.
-            </p>
-          </div>
-        )}
+        {section === "insights" && <InsightsPage />}
         {section === "dictionary" && <DictionaryPage setNotices={setNotices} />}
-        {section === "snippets" && (
-          <div className="pl-stub">
-            <h2>Snippets</h2>
-            <p>
-              Say "insert email" and get a saved block pasted in. Not yet
-              shipped.
-            </p>
-          </div>
-        )}
-        {section === "style" && (
-          <div className="pl-stub">
-            <h2>Style</h2>
-            <p>
-              Give PromptLoom a tone target per app — formal for Gmail, casual
-              for Slack, lowercase in Terminal. The three transcript modes
-              (Normal / Code / Terminal) in Settings are the first step. Per-app
-              style profiles are on the roadmap.
-            </p>
-          </div>
-        )}
-        {section === "transforms" && (
-          <div className="pl-stub">
-            <h2>Transforms</h2>
-            <p>
-              Mid-dictation voice commands like "make that formal" or "fix
-              grammar" via your local Ollama model. Not yet shipped. Will reuse
-              the LLM polish pipeline in Settings.
-            </p>
-          </div>
-        )}
-        {section === "notetaker" && (
-          <div className="pl-stub">
-            <h2>Notetaker</h2>
-            <p>
-              Transcribe meetings locally and get summaries. Not yet shipped.
-            </p>
-          </div>
-        )}
-        {section === "scratchpad" && (
-          <div className="pl-stub">
-            <h2>Scratchpad</h2>
-            <p>
-              A disposable text pane for dictating into when no other app is
-              open. Not yet shipped.
-            </p>
-          </div>
-        )}
+        {section === "snippets" && <SnippetsPage />}
+        {section === "style" && <StylePage />}
+        {section === "transforms" && <TransformsPage />}
+        {section === "notetaker" && <NotetakerPage />}
+        {section === "scratchpad" && <ScratchpadPage />}
       </main>
 
       {/* Right rail (only on Dictation) */}
@@ -584,6 +554,1581 @@ function DictationPage({
 }
 
 /* ---------------------------- Dictionary page ---------------------------- */
+
+type PolishModelSummary = {
+  name: string;
+  size_bytes: number;
+  note: string | null;
+  installed: boolean;
+  is_default: boolean;
+};
+
+function PolishModelDownloader() {
+  const [models, setModels] = useState<PolishModelSummary[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [progress, setProgress] = useState<{ bytes: number; total: number } | null>(
+    null
+  );
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = () =>
+    invoke<PolishModelSummary[]>("list_polish_models")
+      .then(setModels)
+      .catch((e) => setErr(String(e)));
+
+  useEffect(() => {
+    refresh();
+    const unProgress = listen<{ bytes: number; total: number }>(
+      "promptloom:polish-download",
+      (e) => setProgress(e.payload)
+    );
+    const unDone = listen<boolean>("promptloom:polish-download-done", (e) => {
+      setDownloading(null);
+      setProgress(null);
+      if (!e.payload) setErr("Download failed. Check network and retry.");
+      refresh();
+    });
+    return () => {
+      unProgress.then((f) => f());
+      unDone.then((f) => f());
+    };
+  }, []);
+
+  const download = async (name: string) => {
+    setErr(null);
+    setDownloading(name);
+    setProgress({ bytes: 0, total: 0 });
+    try {
+      await invoke("download_polish_model_cmd", { name });
+    } catch (e) {
+      setErr(String(e));
+      setDownloading(null);
+    }
+  };
+
+  const pct =
+    progress && progress.total > 0
+      ? Math.floor((progress.bytes / progress.total) * 100)
+      : 0;
+
+  if (models.length === 0) {
+    return null;
+  }
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div
+        className="pl-section-label"
+        style={{ marginBottom: 8, fontSize: 11 }}
+      >
+        Available polish models
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {models.map((m) => (
+          <div
+            key={m.name}
+            className="pl-row between"
+            style={{
+              padding: "10px 12px",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "var(--fg)" }}>
+                {m.name}
+                {m.is_default && (
+                  <span
+                    className="pl-pill"
+                    style={{ marginLeft: 8, fontSize: 10 }}
+                  >
+                    recommended
+                  </span>
+                )}
+              </div>
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "var(--fg-dim)",
+                  marginTop: 2,
+                }}
+              >
+                {(m.size_bytes / 1_000_000_000).toFixed(2)} GB
+                {m.note ? ` · ${m.note}` : ""}
+              </div>
+            </div>
+            {m.installed ? (
+              <span className="pl-pill ok">
+                <span className="dot" /> installed
+              </span>
+            ) : downloading === m.name ? (
+              <div style={{ minWidth: 140 }}>
+                <div className="pl-progress">
+                  <div
+                    className="pl-progress-fill"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <div
+                  className="pl-dim pl-mono"
+                  style={{ fontSize: 10, marginTop: 2, textAlign: "right" }}
+                >
+                  {pct}%
+                </div>
+              </div>
+            ) : (
+              <button
+                className="pl-btn"
+                onClick={() => download(m.name)}
+                disabled={!!downloading}
+              >
+                Download
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {err && (
+        <div className="pl-notice danger" style={{ marginTop: 8 }}>
+          {err}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StylePage() {
+  return (
+    <div className="pl-stack" style={{ maxWidth: 820 }}>
+      <h2
+        style={{
+          fontFamily: "var(--font-display)",
+          fontStyle: "italic",
+          fontWeight: 500,
+          fontSize: 32,
+          margin: "0 0 6px",
+          color: "var(--fg)",
+        }}
+      >
+        Style
+      </h2>
+      <p style={{ color: "var(--fg-dim)", margin: "0 0 20px", fontSize: 14 }}>
+        Give each app its own tone. The bundled polish model rewrites your
+        transcript in that register before it's pasted. Apps detected as Code
+        or Terminal keep their raw style.
+      </p>
+      <StyleTonePreview />
+      <AppProfilesSection />
+    </div>
+  );
+}
+
+function StyleTonePreview() {
+  const sample = "yeah so I just wanted to let you know the thing is done";
+  const casual = "Yeah, so I just wanted to let you know — the thing's done.";
+  const formal =
+    "I wanted to let you know that the task has been completed.";
+  return (
+    <section className="pl-section">
+      <div className="pl-section-label">How tones read</div>
+      <div className="pl-card">
+        <div style={{ fontSize: 13, color: "var(--fg-dim)", marginBottom: 10 }}>
+          You dictate:
+        </div>
+        <div
+          className="pl-mono"
+          style={{
+            fontSize: 13,
+            padding: "10px 12px",
+            background: "var(--bg-alt)",
+            borderRadius: 6,
+            marginBottom: 16,
+          }}
+        >
+          "{sample}"
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 12,
+          }}
+        >
+          <div
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: 12,
+            }}
+          >
+            <div
+              className="pl-section-label"
+              style={{ marginBottom: 6, fontSize: 11 }}
+            >
+              casual
+            </div>
+            <div style={{ fontSize: 13 }}>{casual}</div>
+          </div>
+          <div
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: 12,
+            }}
+          >
+            <div
+              className="pl-section-label"
+              style={{ marginBottom: 6, fontSize: 11 }}
+            >
+              formal
+            </div>
+            <div style={{ fontSize: 13 }}>{formal}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const TRANSFORMS: { phrase: string; name: string; sample: [string, string] }[] = [
+  {
+    phrase: "make that formal",
+    name: "Make formal",
+    sample: [
+      "yeah we're gonna ship it tomorrow",
+      "We plan to ship it tomorrow.",
+    ],
+  },
+  {
+    phrase: "make that casual",
+    name: "Make casual",
+    sample: [
+      "I would like to inform you that the task is complete",
+      "Just letting you know — it's done.",
+    ],
+  },
+  {
+    phrase: "make that shorter",
+    name: "Make shorter",
+    sample: [
+      "I was just thinking that we should probably go ahead and try it",
+      "Let's try it.",
+    ],
+  },
+  {
+    phrase: "fix grammar",
+    name: "Fix grammar",
+    sample: [
+      "me and him was going to the store",
+      "He and I were going to the store.",
+    ],
+  },
+];
+
+type NotetakerStatus = {
+  recording: boolean;
+  elapsed_secs: number;
+  path: string | null;
+  chars_written: number;
+};
+
+type MeetingSummary = {
+  path: string;
+  name: string;
+  bytes: number;
+  modified_secs: number;
+};
+
+function NotetakerPage() {
+  const [status, setStatus] = useState<NotetakerStatus | null>(null);
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [meetings, setMeetings] = useState<MeetingSummary[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [selectedBody, setSelectedBody] = useState<string>("");
+  const [summary, setSummary] = useState<string | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refreshStatus = () =>
+    invoke<NotetakerStatus>("notetaker_status").then(setStatus);
+  const refreshMeetings = () =>
+    invoke<MeetingSummary[]>("notetaker_list_meetings").then(setMeetings);
+
+  useEffect(() => {
+    refreshStatus();
+    refreshMeetings();
+    const id = setInterval(refreshStatus, 2000);
+    const unTx = listen<string>("promptloom:notetaker-transcript", (e) => {
+      setLiveTranscript((prev) => (prev ? prev + "\n\n" + e.payload : e.payload));
+    });
+    const unState = listen<string>("promptloom:notetaker-state", (e) => {
+      refreshStatus();
+      if (e.payload === "idle") {
+        refreshMeetings();
+      } else if (e.payload === "recording") {
+        setLiveTranscript("");
+      }
+    });
+    return () => {
+      clearInterval(id);
+      unTx.then((f) => f());
+      unState.then((f) => f());
+    };
+  }, []);
+
+  const start = async () => {
+    setErr(null);
+    try {
+      await invoke<string>("notetaker_start");
+      refreshStatus();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  const stop = async () => {
+    try {
+      await invoke("notetaker_stop");
+      refreshStatus();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const open = async (m: MeetingSummary) => {
+    setSelected(m.path);
+    setSummary(null);
+    try {
+      const body = await invoke<string>("notetaker_read_meeting", {
+        path: m.path,
+      });
+      setSelectedBody(body);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const summarize = async () => {
+    if (!selected) return;
+    setSummarizing(true);
+    setSummary(null);
+    try {
+      const s = await invoke<string>("notetaker_summarize_meeting", {
+        path: selected,
+      });
+      setSummary(s);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
+  const fmtDuration = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+  const fmtTs = (secs: number) => {
+    if (!secs) return "—";
+    return new Date(secs * 1000).toLocaleString();
+  };
+
+  return (
+    <div className="pl-stack" style={{ maxWidth: 1040 }}>
+      <h2
+        style={{
+          fontFamily: "var(--font-display)",
+          fontStyle: "italic",
+          fontWeight: 500,
+          fontSize: 32,
+          margin: "0 0 6px",
+          color: "var(--fg)",
+        }}
+      >
+        Notetaker
+      </h2>
+      <p style={{ color: "var(--fg-dim)", margin: "0 0 20px", fontSize: 14 }}>
+        Long-form meeting transcription. Captures from your microphone only —
+        the other side of the call is captured only to the extent your mic
+        hears it through speakers. 15-second chunks, appends to a markdown file
+        in <code className="pl-inline">%APPDATA%/com.promptloom.desktop/meetings/</code>.
+        No system audio loopback, no speaker labels.
+      </p>
+
+      <section className="pl-section">
+        <div className="pl-card">
+          <div className="pl-row between" style={{ marginBottom: 12 }}>
+            <div>
+              <div className="pl-section-label" style={{ marginBottom: 4 }}>
+                {status?.recording ? "Recording" : "Idle"}
+              </div>
+              <div
+                style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 28,
+                  color: "var(--fg)",
+                }}
+              >
+                {status?.recording ? fmtDuration(status.elapsed_secs) : "0:00"}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {status?.recording ? (
+                <button className="pl-btn danger" onClick={stop}>
+                  Stop
+                </button>
+              ) : (
+                <button className="pl-btn primary" onClick={start}>
+                  Start recording
+                </button>
+              )}
+            </div>
+          </div>
+          {err && <div className="pl-notice danger">{err}</div>}
+          {status?.recording && (
+            <div
+              style={{
+                marginTop: 10,
+                maxHeight: 220,
+                overflowY: "auto",
+                padding: 12,
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                fontSize: 13,
+                lineHeight: 1.55,
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {liveTranscript ||
+                "Listening. New text will appear every ~15 seconds."}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="pl-section">
+        <div className="pl-section-label">Saved meetings ({meetings.length})</div>
+        {meetings.length === 0 ? (
+          <div className="pl-muted" style={{ fontSize: 13 }}>
+            No meetings yet. Press Start recording above to capture one.
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "280px 1fr",
+              gap: 16,
+            }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {meetings.map((m) => (
+                <button
+                  key={m.path}
+                  onClick={() => open(m)}
+                  className={`pl-btn ${selected === m.path ? "active" : ""}`}
+                  style={{
+                    textAlign: "left",
+                    padding: "10px 12px",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "flex-start",
+                    gap: 2,
+                  }}
+                >
+                  <span className="pl-mono" style={{ fontSize: 12 }}>
+                    {m.name}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--fg-dim)" }}>
+                    {(m.bytes / 1000).toFixed(1)} KB · {fmtTs(m.modified_secs)}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                padding: 14,
+                minHeight: 260,
+                background: "var(--bg)",
+              }}
+            >
+              {selected ? (
+                <>
+                  <div
+                    className="pl-row between"
+                    style={{ marginBottom: 10 }}
+                  >
+                    <div
+                      className="pl-mono"
+                      style={{ fontSize: 12, color: "var(--fg-dim)" }}
+                    >
+                      {selected}
+                    </div>
+                    <button
+                      className="pl-btn"
+                      onClick={summarize}
+                      disabled={summarizing}
+                    >
+                      {summarizing ? "Summarizing…" : "Summarize"}
+                    </button>
+                  </div>
+                  {summary && (
+                    <div
+                      style={{
+                        marginBottom: 12,
+                        padding: 10,
+                        background: "var(--bg-alt)",
+                        borderRadius: 4,
+                        borderLeft: "3px solid var(--accent)",
+                        fontSize: 13,
+                        lineHeight: 1.55,
+                        whiteSpace: "pre-wrap",
+                      }}
+                    >
+                      <div
+                        className="pl-section-label"
+                        style={{ marginBottom: 6, fontSize: 10 }}
+                      >
+                        Summary
+                      </div>
+                      {summary}
+                    </div>
+                  )}
+                  <pre
+                    style={{
+                      fontSize: 13,
+                      lineHeight: 1.55,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      margin: 0,
+                      fontFamily: "var(--font-body)",
+                      maxHeight: 420,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {selectedBody}
+                  </pre>
+                </>
+              ) : (
+                <div className="pl-muted" style={{ fontSize: 13 }}>
+                  Select a meeting on the left to read it.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <div className="pl-notice">
+        <strong>Known limitations:</strong> mic only (no system audio), no
+        speaker labels, 15-second chunks mean sentences occasionally split
+        across boundaries. Summary uses the bundled polish model — install one
+        in Settings to enable it.
+      </div>
+    </div>
+  );
+}
+
+const TRANSFORM_ACTIONS = [
+  { key: "make_formal", label: "Formal" },
+  { key: "make_casual", label: "Casual" },
+  { key: "make_shorter", label: "Shorter" },
+  { key: "fix_grammar", label: "Fix grammar" },
+];
+
+function TransformsPage() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [auto, setAuto] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<Settings>("get_settings").then((s) => {
+      setEnabled(s.transforms_enabled);
+      setAuto(s.auto_transform ?? null);
+    });
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    try {
+      const updated = await invoke<Settings>("set_transforms_enabled", {
+        enabled: next,
+      });
+      setEnabled(updated.transforms_enabled);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+  const chooseAuto = async (next: string | null) => {
+    try {
+      const updated = await invoke<Settings>("set_auto_transform", {
+        action: next,
+      });
+      setAuto(updated.auto_transform ?? null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  return (
+    <div className="pl-stack" style={{ maxWidth: 980 }}>
+      <div className="pl-row between" style={{ marginBottom: 20 }}>
+        <h2
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 34,
+            margin: 0,
+            color: "var(--fg)",
+          }}
+        >
+          Transforms
+          <span className="pl-beta">Beta</span>
+        </h2>
+        <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+          <label
+            style={{
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
+              cursor: "pointer",
+            }}
+          >
+            <span style={{ fontSize: 13, color: "var(--fg-dim)" }}>Opt in</span>
+            <input
+              type="checkbox"
+              checked={enabled ?? true}
+              onChange={(e) => toggle(e.target.checked)}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="pl-hero">
+        <h3>
+          Transforms work <em>wherever</em> you write.
+        </h3>
+        <p>
+          After a dictation lands, say one of these phrases on its own to
+          rewrite what you just pasted — the bundled polish model does the
+          rewrite, keystrokes replace the text in place. Works in any window.
+        </p>
+      </div>
+
+      <section className="pl-section">
+        <div
+          className="pl-card"
+          style={{ display: "flex", alignItems: "center", gap: 14 }}
+        >
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, color: "var(--fg)" }}>
+              Auto apply after dictation
+            </div>
+            <div
+              style={{ fontSize: 12, color: "var(--fg-dim)", marginTop: 4 }}
+            >
+              Run a transform on everything you dictate, automatically.
+            </div>
+          </div>
+          <select
+            className="pl-input"
+            value={auto ?? ""}
+            onChange={(e) =>
+              chooseAuto(e.target.value === "" ? null : e.target.value)
+            }
+            style={{ minWidth: 180 }}
+          >
+            <option value="">Off</option>
+            {TRANSFORM_ACTIONS.map((a) => (
+              <option key={a.key} value={a.key}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
+      <section className="pl-section">
+        <div className="pl-row between" style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontStyle: "italic",
+              fontSize: 22,
+              color: "var(--fg)",
+            }}
+          >
+            My Transforms
+          </div>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, 1fr)",
+            gap: 14,
+          }}
+        >
+          {TRANSFORMS.map((t, i) => (
+            <div key={t.phrase} className="pl-tile">
+              <div className="pl-kbd">
+                <span>Say</span>
+                <span className="pl-mono">"{t.phrase.split(" ")[0]}…"</span>
+              </div>
+              <div
+                style={{
+                  fontFamily: "var(--font-display)",
+                  fontSize: 18,
+                  color: "var(--fg)",
+                }}
+              >
+                {t.name}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--fg-dim)" }}>
+                {i === 0 && "Professional register, no contractions."}
+                {i === 1 && "Conversational, uses contractions."}
+                {i === 2 && "Cut redundancy, keep meaning."}
+                {i === 3 && "Fix spelling and grammar only."}
+              </div>
+            </div>
+          ))}
+          <div className="pl-tile create">
+            <div style={{ fontSize: 24 }}>+</div>
+            <div style={{ fontSize: 13 }}>Create your own</div>
+            <div style={{ fontSize: 11 }}>
+              Coming soon — custom prompts you define.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="pl-notice">
+        <strong>Caveats:</strong> if you've typed or clicked anything else
+        after the dictation, the keystroke-select will grab the wrong text.
+        If the previous paste is longer than ~1200 characters, the transform
+        skips with a notice.
+      </div>
+    </div>
+  );
+}
+
+function InsightsPage() {
+  const [summary, setSummary] = useState<InsightsSummary | null>(null);
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [tab, setTab] = useState<"usage" | "voice">("usage");
+  const [confirmingClear, setConfirmingClear] = useState(false);
+
+  const refresh = () => {
+    invoke<Settings>("get_settings").then((s) => setEnabled(s.insights_enabled));
+    invoke<InsightsSummary>("insights_summary").then(setSummary);
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    try {
+      const updated = await invoke<Settings>("set_insights_enabled", {
+        enabled: next,
+      });
+      setEnabled(updated.insights_enabled);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const clearAll = async () => {
+    try {
+      await invoke("clear_insights");
+      setConfirmingClear(false);
+      refresh();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const appUsage = aggregateAppUsage(summary?.recent ?? []);
+  const streak = computeStreak(summary?.recent ?? []);
+
+  return (
+    <div className="pl-stack" style={{ maxWidth: 1040 }}>
+      <div className="pl-row between" style={{ marginBottom: 18 }}>
+        <h2
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 34,
+            margin: 0,
+            color: "var(--fg)",
+          }}
+        >
+          Insights
+        </h2>
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          gap: 24,
+          borderBottom: "1px solid var(--border)",
+          marginBottom: 24,
+        }}
+      >
+        {(["usage", "voice"] as const).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            style={{
+              background: "transparent",
+              border: 0,
+              padding: "8px 0",
+              marginBottom: -1,
+              borderBottom:
+                tab === t ? "2px solid var(--accent)" : "2px solid transparent",
+              color: tab === t ? "var(--fg)" : "var(--fg-dim)",
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            {t === "usage" ? "Your usage" : "Your voice"}
+          </button>
+        ))}
+      </div>
+
+      {enabled === false && (
+        <div className="pl-notice" style={{ marginBottom: 20 }}>
+          <strong>Insights are off.</strong>{" "}
+          <button
+            className="pl-btn"
+            onClick={() => toggle(true)}
+            style={{ marginLeft: 10 }}
+          >
+            Turn on
+          </button>{" "}
+          <span style={{ fontSize: 12, color: "var(--fg-dim)" }}>
+            Off by default — only aggregate counts are stored, never raw text.
+          </span>
+        </div>
+      )}
+
+      {tab === "usage" && (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 1fr)",
+              gap: 16,
+              marginBottom: 20,
+            }}
+          >
+            <div className="pl-bigstat">
+              <div className="pl-bigstat-num">
+                {summary ? summary.avg_wpm.toFixed(0) : "—"}
+              </div>
+              <div className="pl-bigstat-label" style={{ marginTop: 8 }}>
+                Words per minute
+              </div>
+            </div>
+            <div className="pl-bigstat">
+              <div className="pl-bigstat-num">
+                {summary ? summary.top_words.length : "—"}
+              </div>
+              <div className="pl-bigstat-label" style={{ marginTop: 8 }}>
+                Tracked terms
+              </div>
+              <div className="pl-bigstat-sub">
+                Words of length ≥4, filtered against common stopwords.
+              </div>
+            </div>
+            <div className="pl-bigstat">
+              <div className="pl-bigstat-num">
+                {summary ? summary.total_words.toLocaleString() : "—"}
+              </div>
+              <div className="pl-bigstat-label" style={{ marginTop: 8 }}>
+                Total words dictated
+              </div>
+              <div className="pl-bigstat-sub">
+                {summary?.total_sessions ?? 0} sessions.
+              </div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 16,
+              marginBottom: 20,
+            }}
+          >
+            <div className="pl-card">
+              <div className="pl-row between" style={{ marginBottom: 14 }}>
+                <div
+                  style={{
+                    fontFamily: "var(--font-display)",
+                    fontSize: 22,
+                    color: "var(--fg)",
+                  }}
+                >
+                  Desktop usage
+                </div>
+                <div
+                  className="pl-section-label"
+                  style={{ fontSize: 11, margin: 0 }}
+                >
+                  Total apps used · {appUsage.length}
+                </div>
+              </div>
+              {appUsage.length === 0 ? (
+                <div className="pl-muted" style={{ fontSize: 13 }}>
+                  No session data yet.
+                </div>
+              ) : (
+                appUsage.slice(0, 6).map((u) => (
+                  <div className="pl-usage-row" key={u.app}>
+                    <span style={{ fontSize: 14 }}>▣</span>
+                    <div className="pl-usage-bar">
+                      <div
+                        className="pl-usage-bar-fill"
+                        style={{ width: `${u.pct}%` }}
+                      >
+                        {u.pct >= 20 ? `${u.pct}%` : ""}
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--fg-dim)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                      }}
+                    >
+                      {u.sessions} · {u.app || "unknown"}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="pl-card">
+              <div className="pl-row between" style={{ marginBottom: 14 }}>
+                <div
+                  style={{
+                    fontFamily: "var(--font-display)",
+                    fontSize: 22,
+                    color: "var(--fg)",
+                  }}
+                >
+                  {streak.current} day streak
+                </div>
+                <div
+                  className="pl-section-label"
+                  style={{ fontSize: 11, margin: 0 }}
+                >
+                  Longest · {streak.longest} day{streak.longest === 1 ? "" : "s"}
+                </div>
+              </div>
+              <ActivityHeatmap sessions={summary?.recent ?? []} />
+              <div
+                style={{
+                  marginTop: 10,
+                  fontSize: 11,
+                  color: "var(--fg-dim)",
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                }}
+              >
+                Less
+                {[0, 1, 2, 3, 4].map((l) => (
+                  <span
+                    key={l}
+                    className={`pl-heatmap-cell${l > 0 ? ` l${l}` : ""}`}
+                  />
+                ))}
+                More
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {tab === "voice" && (
+        <section className="pl-section">
+          <div
+            style={{
+              fontFamily: "var(--font-display)",
+              fontSize: 22,
+              color: "var(--fg)",
+              marginBottom: 14,
+            }}
+          >
+            Most-used words
+          </div>
+          <div className="pl-card">
+            {!summary || summary.top_words.length === 0 ? (
+              <div className="pl-muted" style={{ fontSize: 13 }}>
+                Not enough data yet.
+              </div>
+            ) : (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, 1fr)",
+                  gap: 6,
+                }}
+              >
+                {summary.top_words.map(([w, c]) => (
+                  <div key={w} className="pl-row between" style={{ fontSize: 13 }}>
+                    <span className="pl-mono">{w}</span>
+                    <span style={{ color: "var(--fg-dim)" }}>{c}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      <section className="pl-section" style={{ marginTop: 20 }}>
+        <div className="pl-card">
+          {confirmingClear ? (
+            <div className="pl-row between">
+              <span style={{ fontSize: 13 }}>
+                Delete every session and word count? Cannot be undone.
+              </span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="pl-btn" onClick={() => setConfirmingClear(false)}>
+                  Cancel
+                </button>
+                <button className="pl-btn danger" onClick={clearAll}>
+                  Delete all
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="pl-row between">
+              <span style={{ fontSize: 12, color: "var(--fg-dim)" }}>
+                Stored locally in{" "}
+                <code className="pl-inline">
+                  %APPDATA%/com.promptloom.desktop/insights/
+                </code>
+              </span>
+              <button className="pl-btn" onClick={() => setConfirmingClear(true)}>
+                Clear all stats
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function aggregateAppUsage(sessions: SessionRecord[]) {
+  const counts = new Map<string, number>();
+  for (const s of sessions) {
+    const k = s.app || "unknown";
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const total = sessions.length || 1;
+  return [...counts.entries()]
+    .map(([app, n]) => ({
+      app,
+      sessions: n,
+      pct: Math.round((n / total) * 100),
+    }))
+    .sort((a, b) => b.sessions - a.sessions);
+}
+
+function computeStreak(sessions: SessionRecord[]) {
+  if (sessions.length === 0) return { current: 0, longest: 0 };
+  const days = new Set<string>();
+  for (const s of sessions) {
+    const d = new Date(s.ts * 1000);
+    days.add(d.toISOString().slice(0, 10));
+  }
+  const sortedDays = [...days].sort();
+  let longest = 1;
+  let run = 1;
+  for (let i = 1; i < sortedDays.length; i++) {
+    const prev = new Date(sortedDays[i - 1] + "T00:00:00Z").getTime();
+    const cur = new Date(sortedDays[i] + "T00:00:00Z").getTime();
+    if (cur - prev === 86_400_000) {
+      run++;
+      longest = Math.max(longest, run);
+    } else {
+      run = 1;
+    }
+  }
+  // Current streak ending today
+  const today = new Date().toISOString().slice(0, 10);
+  let current = 0;
+  const walk = new Date(today + "T00:00:00Z");
+  while (days.has(walk.toISOString().slice(0, 10))) {
+    current++;
+    walk.setUTCDate(walk.getUTCDate() - 1);
+  }
+  return { current, longest };
+}
+
+function ActivityHeatmap({ sessions }: { sessions: SessionRecord[] }) {
+  // Show the last ~17 weeks (119 days), 7-row column grid.
+  const DAYS = 17 * 7;
+  const counts = new Map<string, number>();
+  for (const s of sessions) {
+    const d = new Date(s.ts * 1000).toISOString().slice(0, 10);
+    counts.set(d, (counts.get(d) ?? 0) + 1);
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const cells: { date: string; level: number; count: number }[] = [];
+  for (let i = DAYS - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const c = counts.get(d) ?? 0;
+    const level = c === 0 ? 0 : c < 2 ? 1 : c < 5 ? 2 : c < 10 ? 3 : 4;
+    cells.push({ date: d, level, count: c });
+  }
+  return (
+    <div className="pl-heatmap">
+      {cells.map((c) => (
+        <span
+          key={c.date}
+          title={`${c.date} · ${c.count} sessions`}
+          className={`pl-heatmap-cell${c.level > 0 ? ` l${c.level}` : ""}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function StatTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{
+        padding: "14px 16px",
+        border: "1px solid var(--border)",
+        borderRadius: 6,
+        background: "var(--bg)",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          color: "var(--fg-dim)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: 24,
+          fontFamily: "var(--font-display)",
+          color: "var(--fg)",
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function SessionSparkline({ sessions }: { sessions: SessionRecord[] }) {
+  if (sessions.length === 0) {
+    return <div className="pl-muted">No sessions yet.</div>;
+  }
+  const max = Math.max(...sessions.map((s) => s.word_count), 1);
+  // Oldest on left, newest on right (reverse the recent[] which is newest-first)
+  const ordered = [...sessions].reverse();
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-end",
+        gap: 4,
+        height: 80,
+      }}
+    >
+      {ordered.map((s, i) => {
+        const h = Math.max(4, (s.word_count / max) * 76);
+        return (
+          <div
+            key={i}
+            title={`${s.word_count} words · ${(s.duration_ms / 1000).toFixed(1)}s${s.app ? ` · ${s.app}` : ""}`}
+            style={{
+              flex: 1,
+              height: h,
+              background: "var(--accent)",
+              borderRadius: 2,
+              opacity: 0.75,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function SnippetsPage() {
+  const [snippets, setSnippets] = useState<[string, string][]>([]);
+  const [name, setName] = useState("");
+  const [body, setBody] = useState("");
+  const [filter, setFilter] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = () =>
+    invoke<[string, string][]>("list_snippets")
+      .then(setSnippets)
+      .catch((e) => setErr(String(e)));
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const add = async () => {
+    setErr(null);
+    try {
+      const next = await invoke<[string, string][]>("add_snippet", {
+        name,
+        body,
+      });
+      setSnippets(next);
+      setName("");
+      setBody("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const remove = async (n: string) => {
+    try {
+      const next = await invoke<[string, string][]>("remove_snippet", {
+        name: n,
+      });
+      setSnippets(next);
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  const filtered = snippets.filter(
+    ([n, b]) =>
+      !filter ||
+      n.toLowerCase().includes(filter.toLowerCase()) ||
+      b.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  const recentSnips = snippets.slice(0, 4);
+  return (
+    <div className="pl-stack" style={{ maxWidth: 940 }}>
+      <div className="pl-row between" style={{ marginBottom: 20 }}>
+        <h2
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 34,
+            margin: 0,
+            color: "var(--fg)",
+          }}
+        >
+          Snippets
+        </h2>
+        <button
+          className="pl-btn primary"
+          onClick={() => {
+            const el = document.getElementById("snippet-name-input");
+            if (el) (el as HTMLInputElement).focus();
+          }}
+        >
+          Add new
+        </button>
+      </div>
+
+      <div className="pl-hero">
+        <h3>
+          The stuff <em>you</em> shouldn't have to re-type.
+        </h3>
+        <p>
+          Save text you dictate often — an email intro, a prompt template, a
+          code block — then say "insert &lt;name&gt;" to drop it in instantly.
+        </p>
+        <div
+          className="pl-chip-row"
+          style={{ flexDirection: "column", alignItems: "flex-start" }}
+        >
+          {recentSnips.length > 0 ? (
+            recentSnips.map(([n, b]) => (
+              <div
+                key={n}
+                style={{ display: "flex", alignItems: "center", gap: 8 }}
+              >
+                <span className="pl-chip pl-mono">"insert {n}"</span>
+                <span style={{ color: "var(--fg-dim)" }}>→</span>
+                <span
+                  className="pl-chip"
+                  style={{
+                    maxWidth: 360,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {b}
+                </span>
+              </div>
+            ))
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="pl-chip pl-mono">"insert linkedin"</span>
+                <span style={{ color: "var(--fg-dim)" }}>→</span>
+                <span className="pl-chip">https://linkedin.com/in/you</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="pl-chip pl-mono">"insert signoff"</span>
+                <span style={{ color: "var(--fg-dim)" }}>→</span>
+                <span className="pl-chip">
+                  Thanks,{" "}— you
+                </span>
+              </div>
+            </>
+          )}
+          <span
+            className="pl-chip btn"
+            onClick={() => {
+              const el = document.getElementById("snippet-name-input");
+              if (el) (el as HTMLInputElement).focus();
+            }}
+            style={{ marginTop: 6 }}
+          >
+            + Add new snippet
+          </span>
+        </div>
+      </div>
+
+      <section className="pl-section">
+        <div className="pl-section-label">Add a snippet</div>
+        <div className="pl-card">
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <input
+              id="snippet-name-input"
+              className="pl-input pl-mono"
+              style={{ flex: 1 }}
+              placeholder="name (one word)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Body — multiple lines OK."
+            style={{
+              width: "100%",
+              minHeight: 100,
+              background: "var(--bg)",
+              color: "var(--fg)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              padding: 10,
+              fontSize: 13,
+              fontFamily: "var(--font-body)",
+              lineHeight: 1.55,
+              resize: "vertical",
+              outline: "none",
+              marginBottom: 10,
+            }}
+          />
+          <button
+            className="pl-btn primary"
+            onClick={add}
+            disabled={!name.trim() || !body.trim()}
+          >
+            Add snippet
+          </button>
+          {err && (
+            <div className="pl-notice danger" style={{ marginTop: 10 }}>
+              {err}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="pl-section">
+        <div className="pl-row between" style={{ marginBottom: 10 }}>
+          <div className="pl-section-label">Saved ({snippets.length})</div>
+          <input
+            className="pl-input"
+            placeholder="Filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            style={{ width: 180 }}
+          />
+        </div>
+        {filtered.length === 0 ? (
+          <div className="pl-muted" style={{ fontSize: 13 }}>
+            {snippets.length === 0
+              ? "No snippets yet. Add one above."
+              : "No snippets match that filter."}
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {filtered.map(([n, b]) => (
+              <div
+                key={n}
+                style={{
+                  padding: "10px 12px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 6,
+                }}
+              >
+                <div
+                  className="pl-row between"
+                  style={{ alignItems: "flex-start" }}
+                >
+                  <span className="pl-mono" style={{ fontSize: 13 }}>
+                    insert {n}
+                  </span>
+                  <button className="pl-btn" onClick={() => remove(n)}>
+                    Remove
+                  </button>
+                </div>
+                <pre
+                  className="pl-mono"
+                  style={{
+                    fontSize: 12,
+                    color: "var(--fg-dim)",
+                    marginTop: 6,
+                    marginBottom: 0,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {b}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ScratchpadPage() {
+  const [text, setText] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    const unlisten = listen<string>("promptloom:transcript", (e) => {
+      if (!e.payload) return;
+      setText((prev) => (prev ? prev + " " + e.payload : e.payload));
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  return (
+    <div className="pl-stack" style={{ maxWidth: 940 }}>
+      <div className="pl-row between" style={{ marginBottom: 20 }}>
+        <h2
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 34,
+            margin: 0,
+            color: "var(--fg)",
+          }}
+        >
+          Scratchpad
+          <span className="pl-beta">Beta</span>
+        </h2>
+      </div>
+
+      <div className="pl-hero">
+        <h3>
+          For quick thoughts <em>you</em> want to come back to.
+        </h3>
+        <p>
+          Drop a to-do, polish a message before you send it, brain-dump an
+          idea. The pad only lives for this session — close the app and it's
+          gone. Copy the result when you're done.
+        </p>
+      </div>
+
+      <div className="pl-card">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Hold your hotkey and speak. Text lands here."
+          style={{
+            width: "100%",
+            minHeight: 320,
+            background: "var(--bg)",
+            color: "var(--fg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: 12,
+            fontSize: 14,
+            fontFamily: "var(--font-body)",
+            lineHeight: 1.6,
+            resize: "vertical",
+            outline: "none",
+          }}
+        />
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginTop: 12,
+            alignItems: "center",
+          }}
+        >
+          <button className="pl-btn primary" onClick={copy} disabled={!text}>
+            {copied ? "Copied" : "Copy all"}
+          </button>
+          <button
+            className="pl-btn"
+            onClick={() => setText("")}
+            disabled={!text}
+          >
+            Clear
+          </button>
+          <span
+            style={{
+              marginLeft: "auto",
+              fontSize: 12,
+              color: "var(--fg-dim)",
+            }}
+          >
+            {text.length} chars · {text.trim() ? text.trim().split(/\s+/).length : 0}{" "}
+            words
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AppProfilesSection() {
   const [profiles, setProfiles] = useState<[string, string][]>([]);
@@ -768,34 +2313,70 @@ function DictionaryPage({
       )
     : terms;
 
+  const recentChips = terms.slice(0, 5);
+
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto" }}>
-      <h1
-        style={{
-          fontFamily: "var(--font-display)",
-          fontStyle: "italic",
-          fontWeight: 500,
-          fontSize: 32,
-          margin: "0 0 10px",
-          letterSpacing: "-0.02em",
-        }}
-      >
-        Dictionary
-      </h1>
-      <p
-        style={{
-          color: "var(--fg-dim)",
-          fontSize: 13.5,
-          margin: "0 0 28px",
-          lineHeight: 1.55,
-          maxWidth: 560,
-        }}
-      >
-        Teach PromptLoom to spell your team's unusual terms. Say "super base"
-        once, add the pair below, and every future dictation of "super base"
-        becomes <code className="pl-inline">Supabase</code>. Case-insensitive
-        on input, exact on output. All local.
-      </p>
+    <div style={{ maxWidth: 940, margin: "0 auto" }}>
+      <div className="pl-row between" style={{ marginBottom: 20 }}>
+        <h1
+          style={{
+            fontFamily: "var(--font-display)",
+            fontStyle: "italic",
+            fontWeight: 500,
+            fontSize: 34,
+            margin: 0,
+            letterSpacing: "-0.02em",
+          }}
+        >
+          Dictionary
+        </h1>
+        <button
+          className="pl-btn primary"
+          onClick={() => {
+            const el = document.getElementById("vocab-from-input");
+            if (el) (el as HTMLInputElement).focus();
+          }}
+        >
+          Add new
+        </button>
+      </div>
+
+      <div className="pl-hero">
+        <h3>
+          PromptLoom spells the way <em>you</em> do.
+        </h3>
+        <p>
+          Correct a spelling once or add it here manually, so your{" "}
+          <strong style={{ color: "var(--fg)" }}>
+            personal terms, company jargon, or uncommon names
+          </strong>{" "}
+          are spelled right in both dictations and meeting notes.
+        </p>
+        <div className="pl-chip-row">
+          <span
+            className="pl-chip btn"
+            onClick={() => {
+              const el = document.getElementById("vocab-from-input");
+              if (el) (el as HTMLInputElement).focus();
+            }}
+          >
+            + Add new word
+          </span>
+          {recentChips.length > 0 ? (
+            recentChips.map(([f, t]) => (
+              <span key={f} className="pl-chip" title={`→ ${t}`}>
+                {t}
+              </span>
+            ))
+          ) : (
+            <>
+              <span className="pl-chip">Supabase</span>
+              <span className="pl-chip">PromptLoom</span>
+              <span className="pl-chip">Qwen</span>
+            </>
+          )}
+        </div>
+      </div>
 
       <div className="pl-card" style={{ marginBottom: 16 }}>
         <div className="pl-card-head" style={{ marginBottom: 12 }}>
@@ -810,6 +2391,7 @@ function DictionaryPage({
               You say
             </div>
             <input
+              id="vocab-from-input"
               className="pl-input"
               style={{ width: "100%", minWidth: 0 }}
               value={from}
@@ -1334,19 +2916,17 @@ function SettingsPage(p: SettingsPageProps) {
             </span>
           </label>
 
+          <PolishModelDownloader />
+
           <div className="pl-notice" style={{ marginTop: 12 }}>
-            To install the model, drop a GGUF file into{" "}
-            <code className="pl-inline">models/polish/</code> (or{" "}
-            <code className="pl-inline">tools/</code>) and{" "}
-            <code className="pl-inline">llama-server.exe</code> next to it.
-            Recommended: Qwen2.5-1.5B Q4_K_M (~1.1 GB). SHA-256 verification
-            via <code className="pl-inline">polish-manifest.json</code>.
-            In-app downloader is on the roadmap.
+            <code className="pl-inline">llama-server.exe</code> must be
+            reachable (next to the model, in <code className="pl-inline">tools/</code>,
+            or via <code className="pl-inline">PROMPTLOOM_LLAMA_SERVER_BIN</code>).
+            Model downloads are SHA-256 verified against{" "}
+            <code className="pl-inline">polish-manifest.json</code>.
           </div>
         </div>
       </section>
-
-      <AppProfilesSection />
 
       {/* Advanced: Ollama fallthrough */}
       <section className="pl-section">

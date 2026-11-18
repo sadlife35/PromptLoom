@@ -103,7 +103,7 @@ https://promptloom.app/privacy
 ## Support contact
 
 ```
-https://github.com/[OWNER]/promptloom/issues
+https://github.com/sadlife35/promptloom/issues
 ```
 
 ## Website

@@ -1,13 +1,22 @@
 {
   "models": [
     {
+      "name": "ggml-large-v3-turbo-q5_0",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
+      "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+      "version": "whisper.cpp ggml large-v3-turbo (q5_0 quantized)",
+      "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
+      "size_bytes": 574041195,
+      "note": "Recommended. Distilled from large-v3 with ~0.5% WER regression but ~8x faster. ~574 MB, roughly realtime on a modern CPU. Closest open-source match to commercial dictation quality. Multilingual."
+    },
+    {
       "name": "ggml-small.en",
       "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
       "sha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
       "version": "whisper.cpp ggml small.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 487614201,
-      "note": "Recommended. Clearly better on technical speech, names, and accents. ~466 MB, 2–3x slower than base on CPU."
+      "note": "Fast mode. English-only. ~466 MB, 3-5x realtime on a typical CPU. Noticeably worse than turbo on names and technical speech."
     },
     {
       "name": "ggml-base.en",
@@ -16,7 +25,7 @@
       "version": "whisper.cpp ggml base.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 147951465,
-      "note": "Balanced. Good for most prose dictation. ~148 MB, ~1s inference on an average CPU."
+      "note": "Balanced for weak hardware. ~148 MB, sub-second inference on an average CPU."
     },
     {
       "name": "ggml-tiny.en",
@@ -34,7 +43,7 @@
       "version": "whisper.cpp ggml medium.en",
       "license_url": "https://huggingface.co/ggerganov/whisper.cpp/blob/main/LICENSE",
       "size_bytes": 1533774781,
-      "note": "Best quality. 2–3x slower than small on CPU, ~1.5 GB download. Pick this if you have a modern CPU or GPU and want maximum accuracy."
+      "note": "English-only legacy large. Prefer large-v3-turbo-q5_0 instead — same quality tier, smaller download, multilingual."
     }
   ]
 }

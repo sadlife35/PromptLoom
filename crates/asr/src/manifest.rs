@@ -9,11 +9,20 @@ pub struct ModelManifest {
     pub name: String,
     pub url: String,
     pub sha256: String,
+    #[serde(default)]
     pub version: String,
     pub license_url: String,
     pub size_bytes: u64,
     #[serde(default)]
     pub note: Option<String>,
+    /// Destination filename. If absent, callers pick a sensible default
+    /// (e.g. `<name>.bin` for whisper models).
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// True for the manifest's default pick (used by UIs that show a
+    /// recommended badge). First entry wins if none is marked.
+    #[serde(default)]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +97,8 @@ mod tests {
             license_url: "https://example/LICENSE".into(),
             size_bytes: 0,
             note: None,
+            filename: None,
+            default: false,
         };
         assert!(verify_hash(&m, "abcdef").is_ok());
     }
@@ -102,6 +113,8 @@ mod tests {
             license_url: "x".into(),
             size_bytes: 0,
             note: None,
+            filename: None,
+            default: false,
         };
         assert!(matches!(
             verify_hash(&m, "bbbb"),

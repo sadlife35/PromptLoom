@@ -30,6 +30,11 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-dialog = "2"
+# Auto-updater scaffold: add this back (and uncomment the .plugin() line
+# in main.rs) after you've generated a signing keypair with
+# `cargo tauri signer generate` and set plugins.updater.pubkey in
+# tauri.conf.json. Registering it with an empty pubkey hangs IPC.
+# tauri-plugin-updater = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"

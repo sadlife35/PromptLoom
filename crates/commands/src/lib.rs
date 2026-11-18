@@ -330,6 +330,46 @@ pub fn detect_selection_command(text: &str) -> Option<SelectionAction> {
     }
 }
 
+/// Mid-dictation transforms that act on the PREVIOUSLY delivered text.
+/// Detected as whole-utterance commands, same safety as selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransformAction {
+    MakeFormal,
+    MakeCasual,
+    MakeShorter,
+    FixGrammar,
+}
+
+/// Detect a transform command. Only matches the whole utterance (after
+/// trimming + lowercasing + trailing-punctuation strip). Same no-substring
+/// rule as `detect_selection_command` — a false positive would rewrite
+/// the user's last paste against their will.
+pub fn detect_transform(text: &str) -> Option<TransformAction> {
+    let normalized: String = text
+        .trim()
+        .trim_end_matches(['.', '!', '?', ','])
+        .trim()
+        .to_lowercase()
+        .replace(',', "");
+    let normalized: String = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    match normalized.as_str() {
+        "make that formal" | "make it formal" | "formal please" => {
+            Some(TransformAction::MakeFormal)
+        }
+        "make that casual" | "make it casual" | "casual please" => {
+            Some(TransformAction::MakeCasual)
+        }
+        "make that shorter" | "make it shorter" | "shorter please" | "shorten that" => {
+            Some(TransformAction::MakeShorter)
+        }
+        "fix grammar" | "fix that grammar" | "fix the grammar" | "fix my grammar" => {
+            Some(TransformAction::FixGrammar)
+        }
+        _ => None,
+    }
+}
+
 /// Parse the transcript, replacing recognized command phrases with their
 /// literal replacements. Also handles the `all caps … end caps` modifier.
 pub fn apply(text: &str, mode: TranscriptMode) -> String {
@@ -449,6 +489,39 @@ mod tests {
 
     fn normal(text: &str) -> String {
         apply(text, TranscriptMode::Normal)
+    }
+
+    #[test]
+    fn detects_transform_formal() {
+        assert_eq!(
+            detect_transform("make that formal"),
+            Some(TransformAction::MakeFormal)
+        );
+        assert_eq!(
+            detect_transform("Formal, please."),
+            Some(TransformAction::MakeFormal)
+        );
+    }
+
+    #[test]
+    fn detect_transform_ignores_mid_sentence() {
+        // "make that formal" embedded in a sentence must NOT trigger.
+        assert_eq!(
+            detect_transform("I want to make that formal invitation count"),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_transform_shorter_and_grammar() {
+        assert_eq!(
+            detect_transform("shorten that"),
+            Some(TransformAction::MakeShorter)
+        );
+        assert_eq!(
+            detect_transform("fix grammar"),
+            Some(TransformAction::FixGrammar)
+        );
     }
 
     #[test]

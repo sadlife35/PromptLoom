@@ -10,6 +10,7 @@
         color-scheme: dark;
         --bg: #0F1114;
         --bg-raised: #16191F;
+        --bg-alt: #16191F;
         --bg-sunken: #0A0C10;
         --fg: #E6E8EC;
         --fg-dim: #8A92A3;
@@ -738,6 +739,191 @@
       .pl-muted { color: var(--fg-dim); }
       .pl-dim { color: var(--fg-very-dim); }
       .pl-mono { font-family: var(--font-mono); }
+
+      /* Hero cards (Wispr-style tagline + chip row) */
+      .pl-hero {
+        position: relative;
+        border-radius: 12px;
+        padding: 28px 28px 24px;
+        margin-bottom: 20px;
+        background:
+          linear-gradient(145deg, rgba(228, 167, 44, 0.08), rgba(228, 167, 44, 0.02)),
+          radial-gradient(circle at top right, rgba(228, 167, 44, 0.12), transparent 60%),
+          var(--bg-alt);
+        border: 1px solid var(--border);
+        overflow: hidden;
+      }
+      .pl-hero h3 {
+        font-family: var(--font-display);
+        font-style: italic;
+        font-weight: 500;
+        font-size: 28px;
+        letter-spacing: -0.015em;
+        margin: 0 0 10px;
+        color: var(--fg);
+      }
+      .pl-hero p {
+        font-size: 13px;
+        color: var(--fg-dim);
+        line-height: 1.6;
+        margin: 0 0 18px;
+        max-width: 560px;
+      }
+      .pl-hero-close {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        background: transparent;
+        border: 0;
+        color: var(--fg-dim);
+        cursor: pointer;
+        font-size: 18px;
+        padding: 4px 8px;
+        border-radius: 4px;
+      }
+      .pl-hero-close:hover { background: rgba(255,255,255,0.05); color: var(--fg); }
+
+      .pl-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .pl-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border-strong);
+        font-size: 12px;
+        color: var(--fg);
+        cursor: default;
+      }
+      .pl-chip.btn {
+        cursor: pointer;
+        background: var(--fg);
+        color: var(--bg);
+        border-color: var(--fg);
+      }
+      .pl-chip.btn:hover { opacity: 0.9; }
+
+      /* Beta pill */
+      .pl-beta {
+        display: inline-block;
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        padding: 3px 7px;
+        margin-left: 10px;
+        background: rgba(228, 167, 44, 0.15);
+        color: var(--accent);
+        border-radius: 4px;
+        vertical-align: middle;
+      }
+
+      /* Hotkey chord chip */
+      .pl-kbd {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--fg-dim);
+      }
+      .pl-kbd span {
+        padding: 2px 6px;
+        border: 1px solid var(--border-strong);
+        border-radius: 3px;
+        background: rgba(255,255,255,0.02);
+      }
+
+      /* Stat tile row — bigger than pl-stat used elsewhere */
+      .pl-bigstat {
+        padding: 22px 24px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg-alt);
+        min-height: 130px;
+      }
+      .pl-bigstat-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--fg-dim);
+        margin-bottom: 12px;
+      }
+      .pl-bigstat-num {
+        font-family: var(--font-display);
+        font-size: 42px;
+        color: var(--fg);
+        line-height: 1;
+      }
+      .pl-bigstat-sub {
+        font-size: 12px;
+        color: var(--fg-dim);
+        margin-top: 10px;
+      }
+
+      /* GitHub-style activity heatmap */
+      .pl-heatmap { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 1fr); gap: 3px; }
+      .pl-heatmap-cell {
+        width: 11px;
+        height: 11px;
+        border-radius: 2px;
+        background: var(--border);
+      }
+      .pl-heatmap-cell.l1 { background: rgba(228, 167, 44, 0.3); }
+      .pl-heatmap-cell.l2 { background: rgba(228, 167, 44, 0.55); }
+      .pl-heatmap-cell.l3 { background: rgba(228, 167, 44, 0.8); }
+      .pl-heatmap-cell.l4 { background: var(--accent); }
+
+      /* Horizontal progress bar inline row (Wispr "Desktop usage") */
+      .pl-usage-row {
+        display: grid;
+        grid-template-columns: 24px 1fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 8px 0;
+      }
+      .pl-usage-bar {
+        height: 18px;
+        border-radius: 4px;
+        background: var(--border);
+        position: relative;
+        overflow: hidden;
+      }
+      .pl-usage-bar-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        background: var(--accent);
+        display: flex;
+        align-items: center;
+        padding-left: 10px;
+        color: var(--bg);
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      /* Transform tile card (hotkey + name + desc) */
+      .pl-tile {
+        padding: 18px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg-alt);
+        min-height: 128px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        cursor: pointer;
+      }
+      .pl-tile:hover { border-color: var(--border-strong); }
+      .pl-tile.create {
+        border-style: dashed;
+        align-items: center;
+        justify-content: center;
+        color: var(--fg-dim);
+      }
 
       /* Hide scrollbar styling (optional) */
       *::-webkit-scrollbar { width: 10px; height: 10px; }
