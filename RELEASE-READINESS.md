@@ -9,7 +9,7 @@ Run **in order** on a vanilla Windows 11 VM with no dev tools installed.
 Each step has a pass criterion. Stop and file a bug on the first fail.
 
 ### A. Install
-1. Copy `PromptLoom_0.1.0_x64-setup.exe` to the VM. Double-click.
+1. Copy `Jot_0.1.0_x64-setup.exe` to the VM. Double-click.
    - **Pass**: NSIS installer opens. **Fail criterion**: SmartScreen red
      wall with no "Run anyway" link (only present until the installer is
      signed — see §2).
@@ -50,7 +50,7 @@ Each step has a pass criterion. Stop and file a bug on the first fail.
     - **Pass**: app returns to onboarding at the model step. Do **not**
       allow hotkey to fire cleanly without a model.
 14. **Revoke mic permission**: Windows Settings → Privacy → Microphone →
-    turn off for PromptLoom → hold hotkey.
+    turn off for Jot → hold hotkey.
     - **Pass**: HUD shows an error with mic-permission hint, does not crash.
 15. **Target window changed**: Open Notepad, focus it, hold `CapsLock`,
     while still holding Alt+Tab to another window, release.

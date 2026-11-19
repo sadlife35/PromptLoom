@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-PromptLoom includes or depends on third-party software with its own licenses.
+Jot includes or depends on third-party software with its own licenses.
 A build-time dependency inventory will be generated with `cargo about` in a
 later milestone. The notable upstream components are:
 
@@ -12,5 +12,5 @@ later milestone. The notable upstream components are:
 - **React 18** — MIT.
 
 Model weights (e.g. `ggml-base.en`) are distributed under their own terms,
-listed in [`models/manifest.json`](./models/manifest.json). PromptLoom does
+listed in [`models/manifest.json`](./models/manifest.json). Jot does
 not redistribute weights; the user downloads them explicitly at setup.

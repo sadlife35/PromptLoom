@@ -1,12 +1,12 @@
 # Microsoft Store listing
 
-Copy-paste these fields into the Partner Center when submitting PromptLoom.
+Copy-paste these fields into the Partner Center when submitting Jot.
 Keep this file updated when the listing changes.
 
 ## Product name
 
 ```
-PromptLoom
+Jot
 ```
 
 ## Short description (≤ 200 characters)
@@ -18,13 +18,13 @@ Local-first voice typing for Windows. Hold a key, speak, release. Nothing goes t
 ## Full description
 
 ```
-PromptLoom is a free, open-source voice typing tool for Windows that runs completely on your PC.
+Jot is a free, open-source voice typing tool for Windows that runs completely on your PC.
 
 Hold a key. Speak. Release. The words you spoke appear in whatever app had keyboard focus — Notepad, VS Code, your browser, Slack, Terminal, anywhere.
 
-Why PromptLoom instead of another dictation tool?
+Why Jot instead of another dictation tool?
 
-• Nothing is sent to any PromptLoom server. All transcription happens locally with whisper.cpp on your PC. After the one-time model download, you can disconnect from the internet and the app still works.
+• Nothing is sent to any Jot server. All transcription happens locally with whisper.cpp on your PC. After the one-time model download, you can disconnect from the internet and the app still works.
 
 • No account, no subscription, no quota. You own the setup. The app is Apache-2.0 licensed; the source is on GitHub.
 
@@ -34,15 +34,15 @@ Why PromptLoom instead of another dictation tool?
 
 • Smart cleanup out of the box: strips "um" / "uh", collapses whisper's repeat-loop hallucinations, applies basic capitalization and honorifics.
 
-• Optional local LLM polish: if you run Ollama on your PC, PromptLoom can send transcripts through your own local model for one additional cleanup pass. Nothing goes to a cloud server.
+• Optional local LLM polish: if you run Ollama on your PC, Jot can send transcripts through your own local model for one additional cleanup pass. Nothing goes to a cloud server.
 
-• Project vocabulary: tell PromptLoom your team's unusual terms (e.g. "super base" → "Supabase") in a committed .promptloom/terms.yml file.
+• Project vocabulary: tell Jot your team's unusual terms (e.g. "super base" → "Supabase") in a committed .promptloom/terms.yml file.
 
-• Safety-first clipboard: if you alt-tab to a different window while dictating, PromptLoom copies the text to your clipboard instead of pasting into the wrong window. Never injects keystrokes blindly.
+• Safety-first clipboard: if you alt-tab to a different window while dictating, Jot copies the text to your clipboard instead of pasting into the wrong window. Never injects keystrokes blindly.
 
 • Built-in privacy audit: a one-click scan that verifies no audio or logs remain on disk.
 
-PromptLoom is alpha software. It works for daily dictation of code comments, emails, Slack messages, and commit messages. It is not for medical or legal transcripts of record. Known limitations are documented in the release notes.
+Jot is alpha software. It works for daily dictation of code comments, emails, Slack messages, and commit messages. It is not for medical or legal transcripts of record. Known limitations are documented in the release notes.
 
 License: Apache-2.0. The whisper.cpp speech engine is MIT. Model weights follow their original licenses.
 ```

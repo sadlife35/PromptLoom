@@ -1,6 +1,6 @@
-# Contributing to PromptLoom
+# Contributing to Jot
 
-Thanks for considering a contribution. PromptLoom is a one-person weekend
+Thanks for considering a contribution. Jot is a one-person weekend
 project that outgrew the author, which means every PR actually matters.
 
 ## Ground rules

@@ -349,7 +349,7 @@ export function Onboarding(props: { onFinish: () => void }) {
             ) : (
               <>
                 <div className="pl-card-body" style={{ marginBottom: 12 }}>
-                  Pick the microphone PromptLoom should listen on. The bar below
+                  Pick the microphone Jot should listen on. The bar below
                   reacts to your voice in real time.
                 </div>
                 <select
@@ -546,7 +546,7 @@ export function Onboarding(props: { onFinish: () => void }) {
         {step === "vocabulary" && (
           <div className="pl-card">
             <div className="pl-card-body" style={{ marginBottom: 12 }}>
-              Point PromptLoom at one folder that contains{" "}
+              Point Jot at one folder that contains{" "}
               <code className="pl-inline">.promptloom/terms.yml</code>. It only
               reads that one file — it does not crawl your project. Corrections
               are applied after transcription, before paste.

@@ -307,7 +307,7 @@ export function App() {
             <span style={{ height: 20 }} />
             <span style={{ height: 14 }} />
           </div>
-          PromptLoom
+          Jot
         </div>
         <nav className="pl-nav">
           {navItems.map((it) => (
@@ -489,7 +489,7 @@ function DictationPage({
 
       <div className="pl-promo">
         <h3 className="pl-promo-eyebrow">
-          Make PromptLoom sound like <em>you</em>
+          Make Jot sound like <em>you</em>
         </h3>
         <p className="pl-promo-sub">
           Teach your vocabulary, polish filler, and keep every byte on your
@@ -2343,7 +2343,7 @@ function DictionaryPage({
 
       <div className="pl-hero">
         <h3>
-          PromptLoom spells the way <em>you</em> do.
+          Jot spells the way <em>you</em> do.
         </h3>
         <p>
           Correct a spelling once or add it here manually, so your{" "}
@@ -2371,7 +2371,7 @@ function DictionaryPage({
           ) : (
             <>
               <span className="pl-chip">Supabase</span>
-              <span className="pl-chip">PromptLoom</span>
+              <span className="pl-chip">Jot</span>
               <span className="pl-chip">Qwen</span>
             </>
           )}
@@ -2813,7 +2813,7 @@ function SettingsPage(p: SettingsPageProps) {
                 Auto-detect from active app
               </div>
               <div className="pl-card-body" style={{ marginTop: 2 }}>
-                When on, PromptLoom picks Code or Terminal mode when it
+                When on, Jot picks Code or Terminal mode when it
                 recognizes editors (VS Code, Cursor, JetBrains…) or shells
                 (Windows Terminal, PowerShell, WezTerm…). For unknown apps,
                 falls back to your manual pick below.
@@ -2877,7 +2877,7 @@ function SettingsPage(p: SettingsPageProps) {
         <div className="pl-section-label">Transcript polish</div>
         <div className="pl-card">
           <div className="pl-card-body" style={{ marginBottom: 12 }}>
-            After the normal pipeline runs, PromptLoom cleans the transcript
+            After the normal pipeline runs, Jot cleans the transcript
             with a <strong style={{ color: "var(--fg)" }}>local LLM</strong>{" "}
             bundled with the app. Fillers get stripped, awkward phrasing
             gets smoothed, and your meaning stays intact. Hard 2-second
@@ -2933,7 +2933,7 @@ function SettingsPage(p: SettingsPageProps) {
         <div className="pl-section-label">Advanced · Custom LLM via Ollama</div>
         <div className="pl-card">
           <div className="pl-card-body" style={{ marginBottom: 12 }}>
-            After the normal pipeline runs, PromptLoom can send the transcript
+            After the normal pipeline runs, Jot can send the transcript
             to your{" "}
             <strong style={{ color: "var(--fg)" }}>own local Ollama server</strong>{" "}
             for one additional cleanup pass. Hard 2-second timeout. Raw-text

@@ -1,4 +1,4 @@
-# PromptLoom
+# Jot
 
 A fast, local-first open-source voice typing tool for Windows. Hold a key,
 speak, release — your words are transcribed on your PC with whisper.cpp
@@ -14,7 +14,7 @@ Apache-2.0 licensed. Written in Rust and TypeScript.
      hold F8 in VS Code, say "the deploy pipeline runs on Tuesday",
      release, text appears. Keep under 10 MB. -->
 
-## Why PromptLoom
+## Why Jot
 
 - **Local transcription.** whisper.cpp runs on your PC. After the model is
   installed, no network calls happen.
@@ -34,7 +34,7 @@ warn the first time you run them. Click **"More info" → "Run anyway"**.
 
 ## Quick start
 
-1. Launch PromptLoom from the Start menu
+1. Launch Jot from the Start menu
 2. Complete the first-run wizard (privacy, microphone, model download,
    shortcut, optional project vocabulary)
 3. Click into any text field (Notepad, VS Code, your browser, a terminal)
@@ -77,7 +77,7 @@ stop recording.
   returns. Nothing is written on cancel. The in-app privacy audit scans
   this directory on demand.
 - **Optional LLM polish is local-only** — it sends the transcript to the
-  Ollama server you run on your own machine. Nothing goes to PromptLoom.
+  Ollama server you run on your own machine. Nothing goes to Jot.
 
 See [`docs/adr/`](docs/adr/) for architectural decisions and
 [`RELEASE_NOTES.md`](RELEASE_NOTES.md) for known limitations.
@@ -150,7 +150,7 @@ Apache-2.0. See [`LICENSE`](LICENSE).
 
 ## Honest limitations
 
-PromptLoom is an alpha built by one person. It is good enough for
+Jot is an alpha built by one person. It is good enough for
 daily dictation of code comments, emails, Slack, and commit messages.
 It is not good enough for:
 

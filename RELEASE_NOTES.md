@@ -1,4 +1,4 @@
-# PromptLoom 0.1.0-alpha.1
+# Jot 0.1.0-alpha.1
 
 Local Windows dictation prototype. Hold a key, speak, release — the text is
 transcribed on your PC with whisper.cpp and pasted into the window you were
@@ -14,7 +14,7 @@ Windows Server, 32-bit Windows, or ARM.
 
 ## What the alpha installer gives you
 
-- The desktop app (`PromptLoom.exe`) — opens Settings and a hidden HUD overlay
+- The desktop app (`Jot.exe`) — opens Settings and a hidden HUD overlay
 - First-run wizard: privacy, microphone, model, hotkey, project vocabulary
 - Global hotkey (default **F8**, hold-to-talk) + **Esc** to cancel
 - Local SHA-256-verified download of the `ggml-base.en` whisper model
@@ -56,7 +56,7 @@ Windows Server, 32-bit Windows, or ARM.
   instead of being pasted (by design — see
   [`docs/adr/0004-clipboard-transaction.md`](docs/adr/0004-clipboard-transaction.md)).
 - **Short utterances (< 250 ms) are rejected** as accidental key taps.
-- **UAC-elevated windows and password managers** are copy-only — PromptLoom
+- **UAC-elevated windows and password managers** are copy-only — Jot
   won't inject keystrokes into higher-integrity processes.
 - **Hotkey choice is limited** to a small safe set (F8/F9/F10/F2). No
   arbitrary chord recording in this alpha.
@@ -74,7 +74,7 @@ Windows Server, 32-bit Windows, or ARM.
 
 ## Checksum verification
 
-Installer file: `PromptLoom_0.1.0_x64-setup.exe` (3.58 MiB)
+Installer file: `Jot_0.1.0_x64-setup.exe` (3.58 MiB)
 
 **SHA-256:**
 ```
@@ -84,7 +84,7 @@ B222A655BC5BC511EDB23CAE653A54B79B79152EB9AE8F636EA1810034039FB5
 Verify after download:
 
 ```powershell
-Get-FileHash .\PromptLoom_0.1.0_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\Jot_0.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
 The output must match the hash above exactly. If it doesn't, do not run the
@@ -92,5 +92,5 @@ installer — the file was modified or corrupted in transit.
 
 ## Licenses
 
-- PromptLoom itself: Apache-2.0
+- Jot itself: Apache-2.0
 - whisper.cpp (bundled binary + model weights): see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to PromptLoom are documented here. Format based on
+All notable changes to Jot are documented here. Format based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning on
 [SemVer](https://semver.org/).
 
@@ -22,10 +22,10 @@ Features and polish shipping toward v0.2.0 (date TBD).
   hallucination now collapses to a single occurrence
 - **Smart capitalization**: sentence starts, standalone `i` → `I`,
   honorifics (`mr.` → `Mr.`, `mrs.`, `dr.`, `prof.`, `jr.`, `sr.`, `st.`)
-- **Opt-in local LLM polish**: if you run Ollama on your PC, PromptLoom
+- **Opt-in local LLM polish**: if you run Ollama on your PC, Jot
   can send the transcript through your own model for one additional
   cleanup pass. Hard 2-second timeout. Raw-text fallback on error.
-  Nothing goes to a PromptLoom server.
+  Nothing goes to a Jot server.
 - **Two speech models**: `ggml-base.en` (default, ~148 MB, balanced) and
   `ggml-tiny.en` (~78 MB, faster, lower quality). Switch in Settings.
 - **Benchmark harness**: `cargo run -p promptloom-bench` reports cold +

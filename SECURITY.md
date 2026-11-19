@@ -7,7 +7,7 @@
 Email `security@promptloom.app` with:
 - A description of the vulnerability
 - Steps to reproduce (even a minimal sketch helps)
-- The version of PromptLoom you're running (Settings → About)
+- The version of Jot you're running (Settings → About)
 - Your Windows version and hardware if the issue appears hardware-dependent
 
 If you prefer encrypted email, our PGP key is published at
@@ -18,7 +18,7 @@ We aim to acknowledge your report within **72 hours**.
 
 ## Scope
 
-PromptLoom's attack surface is deliberately small, but the following are
+Jot's attack surface is deliberately small, but the following are
 in scope for a security report:
 
 - **Audio or transcript leaks** — anything that causes raw audio, raw
@@ -30,7 +30,7 @@ in scope for a security report:
   the one captured at hotkey-press time, failing to restore prior
   clipboard contents when expected, injecting keystrokes into protected
   windows
-- **Unsigned-code-execution path** — PromptLoom should never execute code
+- **Unsigned-code-execution path** — Jot should never execute code
   it didn't ship (model files are verified by SHA-256 before load; the
   whisper-cli sidecar is user-supplied)
 - **Privilege escalation** or any ability to perform an action the user

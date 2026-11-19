@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PromptLoom",
+  "productName": "Jot",
   "version": "0.1.0",
   "identifier": "com.promptloom.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "settings",
-        "title": "PromptLoom Settings",
+        "title": "Jot Settings",
         "width": 720,
         "height": 540,
         "resizable": true,
@@ -22,7 +22,7 @@
       },
       {
         "label": "hud",
-        "title": "PromptLoom HUD",
+        "title": "Jot HUD",
         "width": 160,
         "height": 44,
         "decorations": false,
@@ -43,17 +43,17 @@
       "id": "main",
       "iconPath": "icons/icon.png",
       "iconAsTemplate": true,
-      "tooltip": "PromptLoom — starting…"
+      "tooltip": "Jot — starting…"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
     "resources": ["../../../models/manifest.json"],
-    "publisher": "PromptLoom contributors",
+    "publisher": "Jot contributors",
     "shortDescription": "Local-only Windows dictation",
-    "longDescription": "PromptLoom is a local Windows dictation prototype. Hold a hotkey, speak, release — text is transcribed locally with whisper.cpp and pasted into the window you were focused on. No account, no cloud, no telemetry.",
-    "copyright": "Copyright 2026 PromptLoom contributors",
+    "longDescription": "Jot is a local Windows dictation prototype. Hold a hotkey, speak, release — text is transcribed locally with whisper.cpp and pasted into the window you were focused on. No account, no cloud, no telemetry.",
+    "copyright": "Copyright 2026 Jot contributors",
     "category": "Productivity",
     "icon": [
       "icons/32x32.png",
